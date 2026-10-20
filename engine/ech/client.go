@@ -1,7 +1,8 @@
 // Package cloudflare_ech 封装上游传输隧道：
 //  1. Cloudflare ECH 域前置（Encrypted Client Hello + uTLS Chrome 指纹）
-//  2. SNI 伪装直连（DoH 解析真实 IP + 伪造 SNI + HTTP/2 传输）
-//  3. Direct 明文/标准 TLS 直连（支持 IPv4/IPv6 协议族锁定）
+//  2. 分片真实 SNI 直连（DoH 解析真实 IP + TCP ClientHello 分片 + 证书校验）
+//  3. SNI 伪装直连（DoH 解析真实 IP + 伪造 SNI + HTTP/2 与 HTTP/1.1 传输）
+//  4. Direct 明文/标准 TLS 直连（支持 IPv4/IPv6 协议族锁定）
 //
 // 本模块仅依赖标准库、netdial、utls 与 x/net/http2。
 package cloudflare_ech
@@ -30,11 +31,18 @@ import (
 const (
 	shellDomain   = "cloudflare-ech.com"
 	defaultDohURL = "https://moonchan.xyz/doh"
-	dialTimeout   = netdial.OpTimeout
-	dohTimeout    = netdial.OpTimeout
+	dialTimeout   = netdial.DialTimeout
+	dohTimeout    = netdial.DoHTimeout
 	minTTL        = 60
 	maxTTL        = 24 * 3600
+	maxCacheSize  = 512
 )
+
+// fallbackDohURLs 提供多节点 DoH 容灾：当首选 DoH 不可用或未返回记录时自动依次回退。
+var fallbackDohURLs = []string{
+	"https://moonchan.xyz/doh",
+	"https://1.1.1.1/dns-query",
+}
 
 // Client 是基于 cloudflare-ech.com ECH 域前置的 HTTP 客户端。
 type Client struct {
@@ -61,6 +69,10 @@ var (
 	lastECHConfig []byte
 	refreshOnce   sync.Once
 
+	dohClientMu   sync.Mutex
+	dohClient     *http.Client
+	dohClientKey  string
+
 	echSvcParamRE = regexp.MustCompile(`ech="?([A-Za-z0-9+/=]+)"?`)
 	wsvcWireRE    = regexp.MustCompile(`\\#\s+(\d+)\s+([0-9a-fA-F\s]+)`)
 	nonHexRE      = regexp.MustCompile(`[^0-9a-fA-F]`)
@@ -77,18 +89,39 @@ func currentConfig() *runtimeConfig {
 
 // SetDohURL 设置 DoH 服务端完整 URL。
 func SetDohURL(u string) {
+	u = strings.TrimSpace(u)
+	if u == "" {
+		u = defaultDohURL
+	}
 	nc := *currentConfig()
 	nc.dohURL = u
 	nc.dialIP = ""
 	cfgPtr.Store(&nc)
+	resetDoHClient()
 }
 
 // SetDoHConfig 通过域名与引导 IP 配置 DoH（跳过对 DoH 域名的本地 DNS 解析）。
 func SetDoHConfig(host, bootstrapIP string) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return
+	}
 	nc := *currentConfig()
-	nc.dohURL = fmt.Sprintf("https://%s/doh", host)
-	nc.dialIP = bootstrapIP
+	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
+		nc.dohURL = host
+	} else {
+		nc.dohURL = fmt.Sprintf("https://%s/doh", host)
+	}
+	nc.dialIP = strings.TrimSpace(bootstrapIP)
 	cfgPtr.Store(&nc)
+	resetDoHClient()
+}
+
+func resetDoHClient() {
+	dohClientMu.Lock()
+	dohClient = nil
+	dohClientKey = ""
+	dohClientMu.Unlock()
 }
 
 // SetIPMode 设置全局默认上游出口 IP 协议族（"v4"、"v6" 或 ""）。
@@ -100,6 +133,7 @@ func SetIPMode(mode string) {
 		nc.ipMode = ""
 	}
 	cfgPtr.Store(&nc)
+	resetDoHClient()
 
 	clientsMu.Lock()
 	defer clientsMu.Unlock()
@@ -111,9 +145,9 @@ func SetIPMode(mode string) {
 	clients = map[string]*Client{}
 }
 
-// CheckDualStack 检查 moonchan.xyz 是否发布 A / AAAA 记录。
+// CheckDualStack 检查当前网络 DNS 是否可解析出 A / AAAA 记录。
 func CheckDualStack(ctx context.Context) (hasV4, hasV6 bool) {
-	ips, err := netdial.Dialer().Resolver.LookupIPAddr(ctx, "moonchan.xyz")
+	ips, err := netdial.Dialer().Resolver.LookupIPAddr(ctx, shellDomain)
 	if err != nil {
 		return false, false
 	}
@@ -127,10 +161,77 @@ func CheckDualStack(ctx context.Context) (hasV4, hasV6 bool) {
 	return
 }
 
-// QueryDoH 向当前配置的 DoH 节点发起 DNS 查询（JSON 格式）。
+func getDoHClient(cfg *runtimeConfig, targetHost string) *http.Client {
+	key := cfg.dohURL + "|" + cfg.dialIP + "|" + cfg.ipMode + "|" + targetHost
+	dohClientMu.Lock()
+	defer dohClientMu.Unlock()
+	if dohClient != nil && dohClientKey == key {
+		return dohClient
+	}
+	tr := netdial.Transport()
+	if cfg.dialIP != "" && strings.Contains(cfg.dohURL, targetHost) {
+		tr = tr.Clone()
+		dialIP := cfg.dialIP
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			_, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			return (&net.Dialer{Timeout: dohTimeout, KeepAlive: 30 * time.Second}).DialContext(ctx, network, net.JoinHostPort(dialIP, port))
+		}
+		tr.TLSClientConfig = &tls.Config{
+			ServerName: targetHost,
+			RootCAs:    netdial.RootPool(),
+		}
+	} else if cfg.ipMode != "" {
+		tr = netdial.TransportWithIPMode(cfg.ipMode)
+	}
+	dohClient = &http.Client{Transport: tr, Timeout: dohTimeout}
+	dohClientKey = key
+	return dohClient
+}
+
+// candidateDohEndpoints 返回去重后的主备 DoH 节点列表。
+func candidateDohEndpoints() []string {
+	primary := currentConfig().dohURL
+	seen := map[string]bool{}
+	var out []string
+	if primary != "" {
+		seen[primary] = true
+		out = append(out, primary)
+	}
+	for _, fb := range fallbackDohURLs {
+		if !seen[fb] {
+			seen[fb] = true
+			out = append(out, fb)
+		}
+	}
+	return out
+}
+
+// QueryDoH 向当前配置的 DoH 节点（及容灾备选节点）发起 DNS 查询（JSON 格式）。
 func QueryDoH(ctx context.Context, name string, qtype int) (*http.Response, error) {
-	u := fmt.Sprintf("%s?name=%s&type=%d", currentConfig().dohURL, url.QueryEscape(name), qtype)
-	return doDohRequest(ctx, u)
+	endpoints := candidateDohEndpoints()
+	var lastErr error
+	for _, base := range endpoints {
+		sep := "?"
+		if strings.Contains(base, "?") {
+			sep = "&"
+		}
+		u := fmt.Sprintf("%s%sname=%s&type=%d", base, sep, url.QueryEscape(name), qtype)
+		resp, err := doDohRequest(ctx, u)
+		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
+			return resp, nil
+		}
+		if resp != nil {
+			resp.Body.Close()
+			if err == nil {
+				err = fmt.Errorf("DoH %s status %d", base, resp.StatusCode)
+			}
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 func doDohRequest(ctx context.Context, urlStr string) (*http.Response, error) {
@@ -141,24 +242,11 @@ func doDohRequest(ctx context.Context, urlStr string) (*http.Response, error) {
 	req.Header.Set("Accept", "application/dns-json")
 
 	cfg := currentConfig()
-	tr := netdial.Transport()
-	if cfg.dialIP != "" {
-		tr = tr.Clone()
-		dialIP := cfg.dialIP
-		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			_, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			return (&net.Dialer{Timeout: dohTimeout}).DialContext(ctx, network, net.JoinHostPort(dialIP, port))
-		}
-		if uParsed, err := url.Parse(urlStr); err == nil && uParsed != nil {
-			tr.TLSClientConfig = &tls.Config{ServerName: uParsed.Host}
-		}
-	} else if cfg.ipMode != "" {
-		tr = netdial.TransportWithIPMode(cfg.ipMode)
+	targetHost := ""
+	if uParsed, err := url.Parse(urlStr); err == nil && uParsed != nil {
+		targetHost = uParsed.Hostname()
 	}
-	return (&http.Client{Transport: tr, Timeout: dohTimeout}).Do(req)
+	return getDoHClient(cfg, targetHost).Do(req)
 }
 
 type dohResponse struct {
@@ -169,24 +257,34 @@ type dohResponse struct {
 	} `json:"Answer"`
 }
 
+// InvalidateECHCache 清除指定域名的缓存 ECH 配置（用于密钥轮换导致握手失败时立即重拉）。
+func InvalidateECHCache(domain string) {
+	cacheMu.Lock()
+	delete(cache, domain)
+	cacheMu.Unlock()
+	if domain == shellDomain {
+		clientsMu.Lock()
+		lastECHConfig = nil
+		clients = map[string]*Client{}
+		clientsMu.Unlock()
+	}
+}
+
 func fetchECHConfig(ctx context.Context, domain string) ([]byte, error) {
 	cacheMu.Lock()
 	if e, ok := cache[domain]; ok && time.Now().Before(e.expiry) {
+		cfg := e.config
 		cacheMu.Unlock()
-		return e.config, nil
+		return cfg, nil
 	}
 	cacheMu.Unlock()
 
-	dohURL := currentConfig().dohURL
-	return netdial.Retry(ctx, netdial.RetryAttempts, netdial.RetryBackoff, func() ([]byte, error) {
+	return netdial.Retry(ctx, 2, netdial.RetryBackoff, func() ([]byte, error) {
 		resp, err := QueryDoH(ctx, domain, 65)
 		if err != nil {
 			return nil, err
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("DoH %s status %d", dohURL, resp.StatusCode)
-		}
 		var d dohResponse
 		if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
 			return nil, err
@@ -216,6 +314,12 @@ func fetchECHConfig(ctx context.Context, domain string) ([]byte, error) {
 					ttl = maxTTL
 				}
 				cacheMu.Lock()
+				if len(cache) >= maxCacheSize {
+					for k := range cache {
+						delete(cache, k)
+						break
+					}
+				}
 				cache[domain] = &echEntry{config: cfg, expiry: time.Now().Add(time.Duration(ttl) * time.Second)}
 				cacheMu.Unlock()
 				return cfg, nil
@@ -266,6 +370,7 @@ func newTransport(echConfig []byte, ipMode string) *http2.Transport {
 			}
 			uCfg := &utls.Config{
 				ServerName:                     host,
+				RootCAs:                        netdial.RootPool(),
 				EncryptedClientHelloConfigList: echConfig,
 				MinVersion:                     tls.VersionTLS13,
 				NextProtos:                     []string{"h2", "http/1.1"},
@@ -274,14 +379,18 @@ func newTransport(echConfig []byte, ipMode string) *http2.Transport {
 			if mode == "" || mode == "auto" {
 				mode = currentConfig().ipMode
 			}
-			return netdial.Retry(ctx, netdial.RetryAttempts, netdial.RetryBackoff, func() (net.Conn, error) {
+			return netdial.Retry(ctx, 2, netdial.RetryBackoff, func() (net.Conn, error) {
 				rawConn, err := netdial.DialContextIPMode(ctx, shellDomain, "443", mode, dialTimeout)
 				if err != nil {
 					return nil, err
 				}
 				uConn := utls.UClient(rawConn, uCfg, utls.HelloChrome_120)
-				if err := uConn.HandshakeContext(ctx); err != nil {
+				hCtx, cancel := context.WithTimeout(ctx, netdial.TLSHandshakeTimeout)
+				err = uConn.HandshakeContext(hCtx)
+				cancel()
+				if err != nil {
 					rawConn.Close()
+					InvalidateECHCache(shellDomain)
 					return nil, err
 				}
 				if uConn.ConnectionState().NegotiatedProtocol != "h2" {
@@ -332,18 +441,31 @@ func getECHClient(ipMode string) (*Client, error) {
 	if mode != "v4" && mode != "v6" {
 		mode = "auto"
 	}
+
+	clientsMu.Lock()
+	if c, ok := clients[mode]; ok {
+		clientsMu.Unlock()
+		return c, nil
+	}
+	cfg := lastECHConfig
+	clientsMu.Unlock()
+
+	if len(cfg) == 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), dohTimeout)
+		fetched, err := fetchECHConfig(ctx, shellDomain)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		cfg = fetched
+	}
+
 	clientsMu.Lock()
 	defer clientsMu.Unlock()
 	if c, ok := clients[mode]; ok {
 		return c, nil
 	}
 	if len(lastECHConfig) == 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), dohTimeout)
-		defer cancel()
-		cfg, err := fetchECHConfig(ctx, shellDomain)
-		if err != nil {
-			return nil, err
-		}
 		lastECHConfig = cfg
 	}
 	c := newClient(lastECHConfig, mode)

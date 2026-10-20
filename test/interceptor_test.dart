@@ -1,4 +1,5 @@
 import 'package:ech_browser/interceptor.dart';
+import 'package:ech_browser/main.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -43,20 +44,81 @@ void main() {
       expect(Interceptor.originalHostHeader(Uri.parse('http://z.com:80/a')),
           'z.com');
     });
+
+    test('IPv6 主机自动保留方括号', () {
+      expect(
+          Interceptor.originalHostHeader(Uri.parse('http://[::1]:8443/status')),
+          '[::1]:8443');
+    });
   });
 
   group('Interceptor.isInterceptable', () {
-    test('GET/HEAD 可拦截转发', () {
+    test('GET/HEAD/OPTIONS 可直接拦截转发', () {
       expect(Interceptor.isInterceptable('GET'), isTrue);
       expect(Interceptor.isInterceptable('HEAD'), isTrue);
+      expect(Interceptor.isInterceptable('OPTIONS'), isTrue);
       expect(Interceptor.isInterceptable('get'), isTrue);
     });
 
-    test('带 body 方法放行直连（拦截层拿不到 body）', () {
+    test('带 body 方法由 JS 桥接管，shouldInterceptRequest 返回 false', () {
       expect(Interceptor.isInterceptable('POST'), isFalse);
       expect(Interceptor.isInterceptable('PUT'), isFalse);
       expect(Interceptor.isInterceptable('PATCH'), isFalse);
       expect(Interceptor.isInterceptable('DELETE'), isFalse);
+    });
+  });
+
+  group('Interceptor 重定向与响应头辅助函数', () {
+    test('resolveRedirectUrl 正确处理绝对与相对 Location', () {
+      final base = Uri.parse('https://pixiv.net/artworks/1');
+      expect(
+        Interceptor.resolveRedirectUrl(base, 'https://www.pixiv.net/artworks/1')
+            .toString(),
+        'https://www.pixiv.net/artworks/1',
+      );
+      expect(
+        Interceptor.resolveRedirectUrl(base, '/login?return_to=%2F').toString(),
+        'https://pixiv.net/login?return_to=%2F',
+      );
+      expect(Interceptor.resolveRedirectUrl(base, 'javascript:alert(1)'),
+          isNull);
+    });
+
+    test('extractMimeType 与 extractCharset 正确分离 MIME 与字符集', () {
+      expect(Interceptor.extractMimeType('text/html; charset=UTF-8'),
+          'text/html');
+      expect(
+          Interceptor.extractCharset('text/html; charset=UTF-8'), 'UTF-8');
+      expect(Interceptor.extractMimeType(null), 'application/octet-stream');
+      expect(Interceptor.extractCharset(null), 'utf-8');
+    });
+
+    test('reasonPhraseForStatus 保证非空 reasonPhrase', () {
+      expect(Interceptor.reasonPhraseForStatus(200, ''), 'OK');
+      expect(Interceptor.reasonPhraseForStatus(521, null), 'Status 521');
+      expect(Interceptor.reasonPhraseForStatus(404, 'Not Found'), 'Not Found');
+    });
+  });
+
+  group('BrowserScreen 地址栏归一化与文件名清洗', () {
+    test('normalizeInputToUrl 区分域名、本机地址与搜索词', () {
+      expect(BrowserScreen.normalizeInputToUrl('www.pixiv.net'),
+          'https://www.pixiv.net');
+      expect(BrowserScreen.normalizeInputToUrl('localhost:8443/logs'),
+          'http://localhost:8443/logs');
+      expect(BrowserScreen.normalizeInputToUrl('127.0.0.1:8443'),
+          'http://127.0.0.1:8443');
+      expect(BrowserScreen.normalizeInputToUrl('pixiv 排行榜'),
+          startsWith(kSearchEnginePrefix));
+    });
+
+    test('sanitizeFileName 阻止路径穿越与非法字符', () {
+      final u = Uri.parse('https://i.pximg.net/img-original/12345_p0.jpg');
+      expect(BrowserScreen.sanitizeFileName(null, u), '12345_p0.jpg');
+      expect(BrowserScreen.sanitizeFileName('../../etc/passwd', u),
+          '____etc_passwd');
+      expect(BrowserScreen.sanitizeFileName('a<b>c:d*e?.png', u),
+          'a_b_c_d_e_.png');
     });
   });
 }

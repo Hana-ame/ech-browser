@@ -7,8 +7,25 @@ on:
 
 # 本仓纪律：禁止本地测试。所有编译/测试/静态检查只在 CI 执行。
 jobs:
+  go-test:
+    name: go vet & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Tidy modules
+        run: go mod tidy
+      - name: Go vet
+        run: go vet ./...
+      - name: Go unit tests
+        run: go test -v -race ./...
+
   go-cshared:
     name: go c-shared (${{ matrix.target }})
+    needs: [go-test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

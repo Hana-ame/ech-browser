@@ -1,5 +1,6 @@
 // Package netdial 提供基础网络拨号、公共 DNS 解析、IPv4/IPv6 协议族绑定、
-// Cloudflare IP 识别、远程/本地文件拉取与通用重试工具。本模块不依赖项目内任何其他包。
+// TCP ClientHello 分片（抗被动 DPI）、Cloudflare IP 识别、远程/本地文件拉取与通用重试工具。
+// 本模块不依赖项目内任何其他包。
 package netdial
 
 import (
@@ -17,19 +18,32 @@ import (
 )
 
 const (
-	OpTimeout     = 5 * time.Minute
+	// DialTimeout 是单次 TCP 连接建立超时（避免原 5 分钟超时导致被墙 IP 长时间卡死）。
+	DialTimeout = 8 * time.Second
+	// DoHTimeout 是单次 DoH 查询超时。
+	DoHTimeout = 8 * time.Second
+	// TLSHandshakeTimeout 是单次 TLS 握手超时。
+	TLSHandshakeTimeout = 8 * time.Second
+	// ResponseHeaderTimeout 是等待上游响应头超时（不影响流式大文件 body 传输）。
+	ResponseHeaderTimeout = 20 * time.Second
+	// DNSDialTimeout 是向单个公共 DNS 发起连接/查询的超时。
+	DNSDialTimeout = 2 * time.Second
+	// OpTimeout 保留用于长连接空闲或整体兜底超时。
+	OpTimeout     = 30 * time.Second
 	RetryAttempts = 3
-	RetryBackoff  = 2 * time.Second
+	RetryBackoff  = 400 * time.Millisecond
 )
 
+// dnsServers 优先使用国内/亚太可达性高的公共 DNS，再回退国际 DNS，避免 8.8.8.8 被丢包时阻塞。
 var dnsServers = []string{
-	"8.8.8.8:53",
-	"1.1.1.1:53",
 	"223.5.5.5:53",
+	"119.29.29.29:53",
 	"114.114.114.114:53",
+	"1.1.1.1:53",
+	"8.8.8.8:53",
 }
 
-// 统一维护的 Cloudflare IPv4 / IPv6 网段列表，用于全自动判断目标站点应走 ECH 还是 SNI 伪装。
+// 统一维护的 Cloudflare IPv4 / IPv6 网段列表，用于全自动判断目标站点应走 ECH 还是分片/SNI。
 var cloudflareCIDRs = []string{
 	"104.16.0.0/13", "104.24.0.0/14", "172.64.0.0/13", "141.101.64.0/18",
 	"173.245.48.0/20", "188.114.96.0/20", "190.93.240.0/20", "197.234.240.0/22",
@@ -62,6 +76,14 @@ func IsCloudflareIP(ip net.IP) bool {
 	return false
 }
 
+// IsLocalOrLinkLocalIP 判断 IP 是否属于本机回环、未指定地址或链路本地（含云元数据 169.254.169.254）。
+func IsLocalOrLinkLocalIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+}
+
 var (
 	resolverOnce    sync.Once
 	resolver        *net.Resolver
@@ -76,9 +98,9 @@ func getResolver() *net.Resolver {
 		resolver = &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				d := net.Dialer{Timeout: OpTimeout}
 				var lastErr error
 				for _, dns := range dnsServers {
+					d := net.Dialer{Timeout: DNSDialTimeout}
 					conn, err := d.DialContext(ctx, network, dns)
 					if err == nil {
 						return conn, nil
@@ -92,13 +114,16 @@ func getResolver() *net.Resolver {
 	return resolver
 }
 
-func getRootPool() *x509.CertPool {
+// RootPool 返回系统信任根证书池（兼容 Android/Termux 环境）。
+func RootPool() *x509.CertPool {
 	rootPoolOnce.Do(func() {
 		pool, _ := x509.SystemCertPool()
 		if pool == nil {
 			pool = x509.NewCertPool()
 		}
 		for _, p := range []string{
+			"/etc/ssl/certs/ca-certificates.crt",
+			"/system/etc/security/cacerts",
 			"/data/data/com.termux/files/usr/etc/tls/cert.pem",
 			os.Getenv("PREFIX") + "/etc/tls/cert.pem",
 		} {
@@ -116,7 +141,7 @@ func getRootPool() *x509.CertPool {
 // Dialer 返回绑定了公共 DNS 的拨号器（兼容 Android/Termux 等无 /etc/resolv.conf 的环境）。
 func Dialer() *net.Dialer {
 	return &net.Dialer{
-		Timeout:   OpTimeout,
+		Timeout:   DialTimeout,
 		KeepAlive: 30 * time.Second,
 		Resolver:  getResolver(),
 	}
@@ -124,6 +149,15 @@ func Dialer() *net.Dialer {
 
 // ResolvePreferredIP 按指定的协议族（"v4" 或 "v6"）解析域名并返回首个匹配的 IP。
 func ResolvePreferredIP(ctx context.Context, host, mode string) (string, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		if mode == "v6" && ip.To4() == nil && ip.To16() != nil {
+			return ip.String(), nil
+		}
+		if mode != "v6" && ip.To4() != nil {
+			return ip.String(), nil
+		}
+		return ip.String(), nil
+	}
 	ips, err := getResolver().LookupIPAddr(ctx, host)
 	if err != nil {
 		return "", fmt.Errorf("resolve %s: %w", host, err)
@@ -136,17 +170,23 @@ func ResolvePreferredIP(ctx context.Context, host, mode string) (string, error) 
 			return addr.IP.String(), nil
 		}
 	}
+	if mode == "" && len(ips) > 0 {
+		return ips[0].IP.String(), nil
+	}
 	return "", fmt.Errorf("no %s address for %s", mode, host)
 }
 
 // DialContextIPMode 根据 ipMode（"v4"、"v6" 或 ""/"auto"）向目标 host:port 发起 TCP 连接。
 func DialContextIPMode(ctx context.Context, host, port, mode string, timeout time.Duration) (net.Conn, error) {
+	if timeout <= 0 {
+		timeout = DialTimeout
+	}
 	if mode == "v4" || mode == "v6" {
 		ip, err := ResolvePreferredIP(ctx, host, mode)
 		if err != nil {
 			return nil, err
 		}
-		return (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", net.JoinHostPort(ip, port))
+		return (&net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(ip, port))
 	}
 	return (&net.Dialer{
 		Timeout:   timeout,
@@ -155,15 +195,83 @@ func DialContextIPMode(ctx context.Context, host, port, mode string, timeout tim
 	}).DialContext(ctx, "tcp", net.JoinHostPort(host, port))
 }
 
+// FragmentedConn 对首个 TLS ClientHello 报文做 TCP 分片发送，使被动 DPI 无法在单个 TCP 段中匹配完整 SNI。
+type FragmentedConn struct {
+	net.Conn
+	mu        sync.Mutex
+	firstDone bool
+}
+
+// WrapFragmentedConn 包装底层连接以启用首个 TLS 握手包的 TCP 分片。
+func WrapFragmentedConn(c net.Conn) net.Conn {
+	if c == nil {
+		return nil
+	}
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+	}
+	return &FragmentedConn{Conn: c}
+}
+
+// SplitClientHelloChunks 计算首个 TLS ClientHello 字节流的分片边界（纯函数，便于测试）。
+func SplitClientHelloChunks(b []byte) [][]byte {
+	// 仅对 TLS Handshake record (0x16) 且长度足够时分片
+	if len(b) <= 16 || b[0] != 0x16 {
+		return [][]byte{b}
+	}
+	// 第 1 片：TLS Record Header (5B) + Handshake Header 前 2B = 7B
+	// 第 2 片：到 ClientHello 中部（通常穿过 SNI 扩展区域）
+	cut1 := 7
+	cut2 := len(b) / 3
+	if cut2 <= cut1 {
+		cut2 = cut1 + 1
+	}
+	cut3 := (len(b) * 2) / 3
+	if cut3 <= cut2 {
+		return [][]byte{b[:cut1], b[cut1:]}
+	}
+	return [][]byte{b[:cut1], b[cut1:cut2], b[cut2:cut3], b[cut3:]}
+}
+
+func (fc *FragmentedConn) Write(b []byte) (int, error) {
+	fc.mu.Lock()
+	if fc.firstDone {
+		fc.mu.Unlock()
+		return fc.Conn.Write(b)
+	}
+	fc.firstDone = true
+	fc.mu.Unlock()
+
+	chunks := SplitClientHelloChunks(b)
+	if len(chunks) == 1 {
+		return fc.Conn.Write(b)
+	}
+	total := 0
+	for i, ch := range chunks {
+		n, err := fc.Conn.Write(ch)
+		total += n
+		if err != nil {
+			return total, err
+		}
+		if i < len(chunks)-1 {
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	return total, nil
+}
+
 // Transport 返回全局复用的默认 HTTP Transport。
 func Transport() *http.Transport {
 	transportOnce.Do(func() {
 		cachedTransport = &http.Transport{
-			DialContext:       Dialer().DialContext,
-			TLSClientConfig:   &tls.Config{RootCAs: getRootPool()},
-			MaxIdleConns:      100,
-			IdleConnTimeout:   OpTimeout,
-			ForceAttemptHTTP2: true,
+			DialContext:           Dialer().DialContext,
+			TLSClientConfig:       &tls.Config{RootCAs: RootPool()},
+			TLSHandshakeTimeout:   TLSHandshakeTimeout,
+			ResponseHeaderTimeout: ResponseHeaderTimeout,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   16,
+			IdleConnTimeout:       90 * time.Second,
+			ForceAttemptHTTP2:     true,
 		}
 	})
 	return cachedTransport
@@ -180,12 +288,15 @@ func TransportWithIPMode(mode string) *http.Transport {
 			if err != nil {
 				return nil, err
 			}
-			return DialContextIPMode(ctx, host, port, mode, OpTimeout)
+			return DialContextIPMode(ctx, host, port, mode, DialTimeout)
 		},
-		TLSClientConfig:   &tls.Config{RootCAs: getRootPool()},
-		MaxIdleConns:      100,
-		IdleConnTimeout:   OpTimeout,
-		ForceAttemptHTTP2: true,
+		TLSClientConfig:       &tls.Config{RootCAs: RootPool()},
+		TLSHandshakeTimeout:   TLSHandshakeTimeout,
+		ResponseHeaderTimeout: ResponseHeaderTimeout,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   16,
+		IdleConnTimeout:       90 * time.Second,
+		ForceAttemptHTTP2:     true,
 	}
 }
 
