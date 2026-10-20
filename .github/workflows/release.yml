@@ -80,6 +80,11 @@ jobs:
       - name: Generate Windows runner (if missing)
         run: flutter create --platforms=windows --project-name ech_browser .
       - name: Build Windows release
+        env:
+          # VS 18/MSVC 14.51 把 <experimental/coroutine> 弃用升级为硬错误
+          # (STL1011 C2338)，flutter_inappwebview_windows 插件中招；
+          # 注入弃用静默宏（插件自身 CMake 未带该定义）。
+          CMAKE_CXX_FLAGS: /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
         run: flutter build windows --release
       - name: Upload artifact
         uses: actions/upload-artifact@v4
