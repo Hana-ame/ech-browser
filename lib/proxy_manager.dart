@@ -17,9 +17,15 @@ class ProxyManager {
   int get port => _port;
   String get lastError => _lastError;
 
+  /// 打开 go 内核动态库。
+  ///
+  /// Windows 上**必须按 exe 所在目录的绝对路径加载**：`DynamicLibrary.open`
+  /// 传相对名时按进程当前目录解析，快捷方式/从别处启动时 cwd 不是 exe 目录，
+  /// 会报 error 126「module could not be found」——即使 dll 就在 exe 旁边。
   static DynamicLibrary _open() {
     if (Platform.isWindows) {
-      return DynamicLibrary.open('echproxy.dll');
+      final exeDir = File(Platform.resolvedExecutable).parent.path;
+      return DynamicLibrary.open('$exeDir/echproxy.dll');
     }
     return DynamicLibrary.open('libechproxy.so');
   }
@@ -31,7 +37,7 @@ class ProxyManager {
       final init = lib.lookupFunction<Void Function(), void Function()>('ECHInit');
       init();
     } catch (e) {
-      _lastError = 'init: $e';
+      _lastError = '加载 echproxy.dll 失败：$e';
     }
   }
 
@@ -39,15 +45,22 @@ class ProxyManager {
   /// 内核不做站点探测（通用浏览器，任意网址），绑定即就绪，ECH 懒初始化；
   /// 因此本调用很快，但仍在独立 isolate 执行以防将来变化冻住 UI。
   Future<int> start() async {
-    final port = await Isolate.run<int>(() {
-      final lib = _open();
-      final start = lib
-          .lookupFunction<Uint16 Function(Pointer<Utf8>), int Function(Pointer<Utf8>)>(
-              'StartProxy');
-      return start(nullptr);
-    });
-    _port = port;
-    return port;
+    try {
+      final port = await Isolate.run<int>(() {
+        final lib = _open();
+        final start = lib.lookupFunction<Uint16 Function(Pointer<Utf8>),
+            int Function(Pointer<Utf8>)>('StartProxy');
+        return start(nullptr);
+      });
+      _port = port;
+      if (port <= 0) {
+        _lastError = 'StartProxy 返回 0（内核启动失败）';
+      }
+      return port;
+    } catch (e) {
+      _lastError = '加载 echproxy.dll 失败：$e';
+      return 0;
+    }
   }
 
   void stop() {

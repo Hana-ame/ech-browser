@@ -92,9 +92,15 @@ jobs:
   # 每次 push 都真跑一次：构建 Windows exe → 启动存活检查 → curl go 内核端口。
   # 「构建通过 ≠ 能启动」（v0.2.0 缺 dll 事故），本 job 是那次事故的兜底。
   windows-smoke:
+    needs: [go-cshared]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Download go kernel dll (windows-amd64)
+        uses: actions/download-artifact@v4
+        with:
+          name: go-windows-amd64
+          path: godll
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -127,6 +133,9 @@ jobs:
           Copy-Item -Recurse -Force "$src/*" $dst
           $crt = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($crt) { Copy-Item -Force "$($crt.FullName)\*.dll" $dst }
+          # go 内核 dll 必须与 exe 同目录且名为 echproxy.dll
+          if (-not (Test-Path "godll/echproxy.dll")) { Write-Error "go-windows-amd64 artifact 缺 echproxy.dll"; exit 1 }
+          Copy-Item -Force "godll/echproxy.dll" "$dst/echproxy.dll"
           Get-ChildItem $dst | Select-Object Name
       - name: Smoke test — 真的启动 exe + 验证 go 内核在跑
         shell: pwsh

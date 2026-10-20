@@ -118,29 +118,76 @@ jobs:
           } else {
             Write-Warning "VC++ CRT redist not found; relying on system runtime"
           }
-          Write-Host "--- staged files ---"
           Get-ChildItem $dst -Recurse | Select-Object FullName, Length
-      - name: Smoke test — 真的启动 exe + 验证 go 内核在跑
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-windows
+          path: stage/windows/
+
+  # 打包 + 对「用户实际下载的包」做启动 smoke：构建通过 ≠ 能启动。
+  package-windows:
+    needs: [build-go, flutter-windows]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: flutter-windows
+          path: flutterwin
+      - uses: actions/download-artifact@v4
+        with:
+          name: go-windows-amd64
+          path: godll
+
+      - name: Assemble release folder
         shell: pwsh
         run: |
-          # 「构建通过」不等于「能启动」：缺 dll 时 Windows 加载器直接拒绝创建进程。
-          # 这里做两件事：① 启动 exe 并确认 10s 后仍存活；② curl 内核回环端口，
-          # 确认 go 内核真的起来了（App 启动即 StartProxy）。
-          $exe = "stage/windows/ech_browser.exe"
-          if (-not (Test-Path $exe)) { Write-Error "missing exe: $exe"; exit 1 }
-          $p = Start-Process -FilePath $exe -PassThru `
-                 -RedirectStandardOutput "smoke.out.txt" -RedirectStandardError "smoke.err.txt"
+          $dst = "release/windows"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item -Recurse -Force "flutterwin/*" $dst
+          # go 内核 dll 必须与 exe 同目录且名为 echproxy.dll（运行时按此名加载）
+          Copy-Item -Force "godll/ech-browser-windows-amd64.dll" "$dst/echproxy.dll"
+          Get-ChildItem $dst | Select-Object Name
+
+      - name: Verify required runtime files
+        shell: pwsh
+        run: |
+          $dst = "release/windows"
+          $required = @("ech_browser.exe", "echproxy.dll", "flutter_windows.dll",
+                        "flutter_inappwebview_windows_plugin.dll", "data/icudtl.dat", "data/flutter_assets")
+          $fail = $false
+          foreach ($f in $required) {
+            if (-not (Test-Path (Join-Path $dst $f))) {
+              Write-Error "缺运行必需项: $f"; $fail = $true
+            }
+          }
+          if ($fail) { exit 1 }
+          Write-Host "required runtime files OK"
+
+      - name: Zip (flat, files at zip root)
+        shell: pwsh
+        run: |
+          $dst = "release/windows"
+          New-Item -ItemType Directory -Force -Path "release/out" | Out-Null
+          Compress-Archive -Path "$dst/*" -DestinationPath "release/out/ech-browser-windows-x64.zip" -CompressionLevel Optimal
+          Get-Item "release/out/ech-browser-windows-x64.zip" | Select-Object Name, Length
+
+      - name: Smoke test — 启动 exe（cwd=包目录）+ 验证 go 内核端口
+        shell: pwsh
+        run: |
+          $dir = (Resolve-Path "release/windows").Path
+          $exe = Join-Path $dir "ech_browser.exe"
+          $p = Start-Process -FilePath $exe -WorkingDirectory $dir -PassThru `
+                 -RedirectStandardOutput "$dir/smoke.out.txt" -RedirectStandardError "$dir/smoke.err.txt"
           Start-Sleep -Seconds 10
-          Write-Host "--- stdout ---"; Get-Content smoke.out.txt -ErrorAction SilentlyContinue
-          Write-Host "--- stderr ---"; Get-Content smoke.err.txt -ErrorAction SilentlyContinue
+          Write-Host "--- stderr (tail) ---"
+          Get-Content "$dir/smoke.err.txt" -ErrorAction SilentlyContinue | Select-Object -Last 8
           if ($p.HasExited) {
-            $code = $p.ExitCode
-            Write-Error ("app exited early, exit code: 0x{0:X8} (0xC0000135=DLL_NOT_FOUND, 0xC000007B=BAD_IMAGE)" -f $code)
+            Write-Error ("app exited early, exit code: 0x{0:X8} (0xC0000135=DLL_NOT_FOUND, 0xC000007B=BAD_IMAGE)" -f $p.ExitCode)
             exit 1
           }
           Write-Host "app alive after 10s (pid $($p.Id))"
-          # go 内核端口探活（优先 8443；App 若因占用退回随机端口则这里会失败——
-          # runner 上 8443 空闲，正常应命中）
           $kernelOK = $false
           for ($i = 0; $i -lt 10; $i++) {
             try {
@@ -148,22 +195,21 @@ jobs:
               if ($r.StatusCode -eq 200) { $kernelOK = $true; break }
             } catch { Start-Sleep -Seconds 2 }
           }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           if (-not $kernelOK) {
             Write-Error "go 内核端口 127.0.0.1:8443 未响应（StartProxy 未起来）"
-            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
             exit 1
           }
-          Write-Host "go kernel responded on 127.0.0.1:8443"
-          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-          Write-Host "smoke test passed"
-      - name: Upload artifact
+          Write-Host "go kernel responded on 127.0.0.1:8443 — smoke passed"
+
+      - name: Upload zip artifact
         uses: actions/upload-artifact@v4
         with:
-          name: flutter-windows
-          path: stage/windows/
+          name: windows-zip
+          path: release/out/ech-browser-windows-x64.zip
 
   release:
-    needs: [build-go, flutter-windows]
+    needs: [build-go, package-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -171,28 +217,6 @@ jobs:
         with:
           pattern: "*"
           path: dist
-
-      - name: Assemble Windows zip (exe + 全部运行库 + go dll)
-        run: |
-          mkdir -p release/windows
-          # 整个 Release 目录进包：flutter_windows.dll / 插件 dll / data/ 缺一不可
-          cp -r dist/flutter-windows/. release/windows/
-          # zip 内 dll 必须叫 echproxy.dll（Flutter 运行时 DynamicLibrary.open('echproxy.dll')）
-          cp dist/go-windows-amd64/ech-browser-windows-amd64.dll release/windows/echproxy.dll
-          (cd release/windows && zip -q -r ../ech-browser-windows-x64.zip .)
-          ls -la release/
-
-      - name: Verify zip completeness (缺 dll 直接失败)
-        run: |
-          set -e
-          zipinfo -1 release/ech-browser-windows-x64.zip > /tmp/ziplist.txt
-          echo "--- zip contents ---"; cat /tmp/ziplist.txt
-          for f in ech_browser.exe echproxy.dll flutter_windows.dll; do
-            grep -qx "$f" /tmp/ziplist.txt || { echo "::error::zip 缺 $f"; exit 1; }
-          done
-          grep -q "^data/icudtl.dat$" /tmp/ziplist.txt || { echo "::error::zip 缺 data/icudtl.dat"; exit 1; }
-          grep -q "^data/flutter_assets/" /tmp/ziplist.txt || { echo "::error::zip 缺 data/flutter_assets/"; exit 1; }
-          echo "zip completeness OK"
 
       - name: Create release (idempotent, no assets)
         env:
@@ -203,18 +227,18 @@ jobs:
               --title "${{ github.ref_name }}" \
               --notes "ech-browser ${{ github.ref_name }} — 点开即用的**通用** ECH 独立浏览器（flutter 壳 + go ech 内核）。任意 http(s) 网址可访问；webview 拦截请求交给 go 内核做 ECH/SNI 伪装直连，**无需修改系统 hosts、无需手动安装证书**。
 
-              - \`ech-browser-windows-x64.zip\`：Windows 桌面版（exe + echproxy.dll 同目录即用）
+              - \`ech-browser-windows-x64.zip\`：Windows 桌面版（**整个解压**即用，已含全部运行库与 VC++ runtime；发布前经 CI 启动 smoke 验证）
               - \`ech-browser-linux-amd64.so\` / \`ech-browser-android-arm64.so\` / \`ech-browser-windows-amd64.dll\`：go 内核 c-shared 库
 
-              测试仅在 CI 执行（本仓禁止本地测试）。"
+              测试与启动 smoke 仅在 CI 执行（本仓禁止本地测试）。"
 
       - name: Upload assets (per-file, existing asset kept)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ls -R dist release
+          ls -R dist | head -40
           for f in \
-            release/ech-browser-windows-x64.zip \
+            dist/windows-zip/ech-browser-windows-x64.zip \
             dist/go-linux-amd64/ech-browser-linux-amd64.so \
             dist/go-windows-amd64/ech-browser-windows-amd64.dll \
             dist/go-android-arm64/ech-browser-android-arm64.so; do
