@@ -79,12 +79,24 @@ jobs:
       - run: flutter pub get
       - name: Generate Windows runner (if missing)
         run: flutter create --platforms=windows --project-name ech_browser .
+      - name: Patch flutter_inappwebview_windows CMake (MSVC 14.51 STL1011)
+        shell: pwsh
+        run: |
+          # VS 18 / MSVC 14.51 把 <experimental/coroutine> 弃用升级为硬错误
+          # (STL1011 / C2338)，插件 CMake 未带静默宏；在 pub 缓存里幂等注入。
+          $plug = Get-ChildItem "$env:LOCALAPPDATA\Pub\Cache\hosted\pub.dev" -Directory -Filter "flutter_inappwebview_windows-*" | Select-Object -First 1
+          $cm = Join-Path $plug.FullName "windows\CMakeLists.txt"
+          $anchor = "project(`${PROJECT_NAME} LANGUAGES CXX)"
+          $inject = "add_definitions(-D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)"
+          $text = Get-Content $cm -Raw
+          if ($text -notmatch "SILENCE_EXPERIMENTAL_COROUTINE") {
+            $text = $text.Replace($anchor, "$anchor`n$inject")
+            Set-Content $cm $text
+            Write-Host "patched: $cm"
+          } else {
+            Write-Host "already patched: $cm"
+          }
       - name: Build Windows release
-        env:
-          # VS 18/MSVC 14.51 把 <experimental/coroutine> 弃用升级为硬错误
-          # (STL1011 C2338)，flutter_inappwebview_windows 插件中招；
-          # 注入弃用静默宏（插件自身 CMake 未带该定义）。
-          CMAKE_CXX_FLAGS: /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
         run: flutter build windows --release
       - name: Upload artifact
         uses: actions/upload-artifact@v4
