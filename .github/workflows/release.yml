@@ -142,6 +142,11 @@ jobs:
           name: go-android-arm64
           path: dist/go-android-arm64
       - run: flutter pub get
+      - name: Patch flutter_inappwebview_android proguard (新 AGP 不再支持 proguard-android.txt)
+        run: |
+          PLUG=$(ls -d "$HOME/.pub-cache/hosted/pub.dev/flutter_inappwebview_android-"* | head -1)
+          sed -i "s/proguard-android.txt/proguard-android-optimize.txt/" "$PLUG/android/build.gradle"
+          grep -n "proguard" "$PLUG/android/build.gradle" || true
       - name: Generate Android runner & inject INTERNET + usesCleartextTraffic + libechproxy.so
         run: |
           flutter create --platforms=android --project-name ech_browser .
