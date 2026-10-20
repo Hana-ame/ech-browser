@@ -20,17 +20,17 @@ jobs:
           - target: linux-amd64
             goos: linux
             goarch: amd64
-            out: libechproxy.so
+            out: ech-browser-linux-amd64.so
             cc: ""
           - target: windows-amd64
             goos: windows
             goarch: amd64
-            out: echproxy.dll
+            out: ech-browser-windows-amd64.dll
             cc: x86_64-w64-mingw32-gcc
           - target: android-arm64
             goos: android
             goarch: arm64
-            out: libechproxy.so
+            out: ech-browser-android-arm64.so
             cc: aarch64-linux-android21-clang
     steps:
       - uses: actions/checkout@v4
@@ -118,7 +118,8 @@ jobs:
         run: |
           mkdir -p release/windows
           cp dist/flutter-windows/ech_browser.exe release/windows/
-          cp dist/go-windows-amd64/echproxy.dll release/windows/
+          # zip 内 dll 必须叫 echproxy.dll（Flutter 运行时 DynamicLibrary.open('echproxy.dll')）
+          cp dist/go-windows-amd64/ech-browser-windows-amd64.dll release/windows/echproxy.dll
           (cd release/windows && zip -q -r ../ech-browser-windows-x64.zip .)
           ls -la release/
 
@@ -132,7 +133,7 @@ jobs:
               --notes "ech-browser ${{ github.ref_name }} — 点开即用的**通用** ECH 独立浏览器（flutter 壳 + go ech 内核）。任意 http(s) 网址可访问；webview 拦截请求交给 go 内核做 ECH/SNI 伪装直连，**无需修改系统 hosts、无需手动安装证书**。
 
               - \`ech-browser-windows-x64.zip\`：Windows 桌面版（exe + echproxy.dll 同目录即用）
-              - \`libechproxy.so\`（linux / android-arm64）、\`echproxy.dll\`（windows）：go 内核 c-shared 库
+              - \`ech-browser-linux-amd64.so\` / \`ech-browser-android-arm64.so\` / \`ech-browser-windows-amd64.dll\`：go 内核 c-shared 库
 
               测试仅在 CI 执行（本仓禁止本地测试）。"
 
@@ -143,9 +144,9 @@ jobs:
           ls -R dist release
           for f in \
             release/ech-browser-windows-x64.zip \
-            dist/go-linux-amd64/libechproxy.so \
-            dist/go-windows-amd64/echproxy.dll \
-            dist/go-android-arm64/libechproxy.so; do
+            dist/go-linux-amd64/ech-browser-linux-amd64.so \
+            dist/go-windows-amd64/ech-browser-windows-amd64.dll \
+            dist/go-android-arm64/ech-browser-android-arm64.so; do
             gh release upload "${{ github.ref_name }}" "$f" --repo "${{ github.repository }}" \
               || echo "::warning::upload failed for $f"
           done
