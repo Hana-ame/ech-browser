@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io';
+import 'dart:io' as io;
 import 'dart:typed_data';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'proxy_manager.dart';
@@ -23,9 +23,9 @@ class Interceptor {
     return Uri.parse('http://127.0.0.1:$port$path$query');
   }
 
-  /// 拦截回调：http(s) 请求 → 本地回环内核 → 返回响应流。
-  /// 非 http(s)（自定义 scheme 等）放行；内核未就绪时返回 null 让 webview
-  /// 走默认（显示失败页而非闪退）。
+  /// 拦截回调：http(s) 请求 → 本地回环内核 → 返回响应。
+  /// 非 http(s)（自定义 scheme 等）放行；内核未就绪或链路出错时返回 null
+  /// 让 webview 走默认（显示失败页而非闪退）。
   Future<WebResourceResponse?> onShouldInterceptRequest(
       InAppWebViewController controller, WebResourceRequest request) async {
     final url = request.url;
@@ -33,30 +33,36 @@ class Interceptor {
     final port = proxy.port;
     if (port <= 0) return null;
 
-    final httpClient = HttpClient()
+    final client = io.HttpClient()
       ..connectionTimeout = const Duration(seconds: 30)
       ..followRedirects = false;
 
     try {
       final local = localTarget(port, url);
-      final req = await httpClient.openUrl(request.method, local);
-      req.headers.set(HttpHeaders.hostHeader, url.host);
+      final req = await client.openUrl(request.method ?? 'GET', local);
+      req.headers.set(io.HttpHeaders.hostHeader, url.host);
 
       request.headers?.forEach((key, value) {
         final k = key.toLowerCase();
         if (k == 'host' || _hopByHop.contains(k)) return;
-        req.headers.set(key, value);
+        req.headers.set(key, value ?? '');
       });
 
-      final body = request.body;
-      if (body != null && request.method != 'GET' && request.method != 'HEAD') {
-        req.contentLength = body.length;
-        req.add(body);
-      }
+      // 注意：flutter_inappwebview 6.1.5 的 WebResourceRequest 没有 body 字段，
+      // POST body 无法经 shouldInterceptRequest 获取（Android/本版本通用限制，
+      // 见 README 已知边界）。GET/HEAD/无 body 请求不受影响。
 
       final resp = await req.close();
       final headers = <String, String>{};
       resp.headers.forEach((k, v) => headers[k] = v.join(', '));
+
+      // 6.1.5 的 WebResourceResponse.data 是 Uint8List?（整包缓冲，不支持流）：
+      // MVP 取舍，大媒体流式留给后续迭代（Windows WebView2 走同 API）。
+      final builder = BytesBuilder(copy: false);
+      await for (final chunk in resp) {
+        builder.add(chunk);
+      }
+      final body = builder.toBytes();
 
       return WebResourceResponse(
         contentType:
@@ -64,13 +70,13 @@ class Interceptor {
         statusCode: resp.statusCode,
         reasonPhrase: resp.reasonPhrase,
         headers: headers,
-        data: resp.map((chunk) => Uint8List.fromList(chunk)),
+        data: body,
       );
     } catch (_) {
       // 内核链路出错：放行默认，避免整页闪退。
       return null;
     } finally {
-      httpClient.close(force: true);
+      client.close(force: true);
     }
   }
 }
