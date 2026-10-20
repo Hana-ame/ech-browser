@@ -40,11 +40,41 @@ go 内核（engine/，c-shared，复用 ech-proxy 的 ech 核心 + utls）
 2. 解压双击 `ech_browser.exe`（`echproxy.dll` 必须与 exe 同目录）
 3. 地址栏输入任意网址即可；状态栏显示内核端口，日志页可看内核诊断
 
-## 已知边界（MVP）
+## 已知边界与平台能力（v0.2.0）
 
-- WebSocket / WebRTC / Service Worker / QUIC 不在 webview 拦截范围内（各平台一致）
-- Android `shouldInterceptRequest` 拿不到 POST body，登录表单在 Android 端需
-  专项处理（Windows WebView2 可取 body，无此限制）
+目标是与普通浏览器体验无异；边界按「已解决 / 降级 / 平台硬限制」三档如实列出。
+
+### 已解决（代码层）
+
+- **任意网址 + 非标准端口**：拦截桥保留原始 Host 头含端口（`example.com:8080`）
+- **GET/HEAD 全协议**：页面/图片/媒体/字体/API（GET）均经内核 ECH/SNI 直连
+- **Range/媒体分段**：视频播放器按段请求，每段经内核转发（整包缓冲由分段缓解）
+- **下载**：`onDownloadStart` → 经内核拉取并保存到系统临时目录（提示路径）
+- **新窗口/弹窗**（`target=_blank`）：在当前 webview 内打开
+- **导航**：后退/前进/刷新/主页 + 地址栏；历史状态同步
+- **错误页**：内核失败时展示可读 HTML 错误页（替代裸 502）
+- **Cookie/登录态**：webview 自有 Cookie 存储，请求/响应原样透传
+
+### 降级（功能可用，不经 ECH）
+
+- **POST/PUT/PATCH/DELETE（带 body）**：flutter_inappwebview 6.1.5 的
+  `shouldInterceptRequest` 拿不到请求 body（平台 API 限制）→ **放行直连**：
+  表单提交可用，但对被墙站点（如 pixiv 登录）会失败；状态栏有提示。
+  正解（路线图）：Windows 自研 WebView2 原生插件（`WebResourceRequested` 可取
+  body + 流式响应）；Android 换 GeckoView（扩展 webRequest 可取 body）。
+
+### 平台硬限制（拦截层不可见，文档化）
+
+- **WebSocket / WebRTC / QUIC / Service Worker**：webview 请求拦截 API
+  （Android `shouldInterceptRequest`、WebView2 `WebResourceRequested`、
+  iOS `WKURLSchemeHandler`）均不含这些协议。
+  普通站点走直连可正常使用；被墙站点的 WS 类功能（实时聊天等）不可用。
+  正解（路线图）：以上原生插件路径 + 必要时 JS 桥（覆写 `window.WebSocket` 走内核）。
+
+### 流式响应
+
+- 6.1.5 `WebResourceResponse.data` 为 `Uint8List?`（整包缓冲）。大文件/长视频
+  以 Range 分块为主缓解；完整流式留给 Windows 原生插件（`IRandomAccessStream`）。
 
 ## 构建（CI 内执行，勿本地运行）
 

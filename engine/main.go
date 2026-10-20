@@ -400,7 +400,7 @@ func forward(w http.ResponseWriter, r *http.Request) {
 
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
 	if err != nil {
-		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		errorPage(w, http.StatusBadRequest, "请求构建失败", err, target)
 		return
 	}
 	req.ContentLength = r.ContentLength
@@ -423,7 +423,7 @@ func forward(w http.ResponseWriter, r *http.Request) {
 	resp, err := cloudflare_ech.RoundTrip(req, "", "")
 	if err != nil {
 		log.Printf("RoundTrip error: %v", err)
-		http.Error(w, "upstream fetch failed: "+err.Error(), http.StatusBadGateway)
+		errorPage(w, http.StatusBadGateway, "上游访问失败", err, target)
 		return
 	}
 	defer resp.Body.Close()
@@ -465,3 +465,20 @@ func forward(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {}
+
+// errorPage 输出可读的错误页（替代裸 502 文本），与普通浏览器的错误页体验对齐。
+func errorPage(w http.ResponseWriter, code int, title string, err error, target string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(code)
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><title>%s</title>
+<style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;padding:2rem;max-width:42rem}
+code{background:#000;border:1px solid #333;padding:2px 6px;border-radius:4px}
+a{color:#7cb3ff}</style></head><body>
+<h1>%s</h1>
+<p>访问 <code>%s</code> 失败。</p>
+<p>%v</p>
+<p>诊断日志见应用内「日志」页或 <code>127.0.0.1:<a href="/logs">/logs</a></code>。
+这是 ech-browser 内核错误页；普通站点直连不受影响。</p>
+</body></html>`, title, title, target, err)
+}

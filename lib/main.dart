@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'interceptor.dart';
@@ -5,7 +6,7 @@ import 'proxy_manager.dart';
 
 /// ech-browser：点开即用的通用 ECH 浏览器。
 /// 任意 http(s) 网址可访问；webview 请求经拦截交给本地 go 内核，
-/// 免改系统 hosts、免手动安装证书。
+/// 免改系统 hosts、免手动安装证书。目标：与普通浏览器使用体验无异。
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const EchBrowserApp());
@@ -41,6 +42,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
   InAppWebViewController? _web;
   bool _starting = true;
   String _status = '正在启动内核…';
+  bool _canGoBack = false;
+  bool _canGoForward = false;
 
   @override
   void initState() {
@@ -73,12 +76,37 @@ class _BrowserScreenState extends State<BrowserScreen> {
     }
   }
 
+  void _setStatus(String s) {
+    if (mounted) setState(() => _status = s);
+  }
+
+  Future<void> _handleDownload(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    _setStatus('下载中：$url');
+    final bytes = await _interceptor.fetchBytes(uri);
+    if (bytes == null || !mounted) {
+      _setStatus('下载失败：$url（已放行直连）');
+      return;
+    }
+    final dir = await Directory.systemTemp.createTemp('ech-browser-dl');
+    final name = uri.pathSegments.isNotEmpty ? uri.pathSegments.last : 'download.bin';
+    final file = File('${dir.path}/$name');
+    await file.writeAsBytes(bytes);
+    _setStatus('已下载：${file.path}');
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: Row(
           children: [
+            _navButton(Icons.arrow_back, _canGoBack, () => _web?.goBack()),
+            _navButton(Icons.arrow_forward, _canGoForward, () => _web?.goForward()),
+            _navButton(Icons.home, true, () => _go(kHomePage)),
+            _navButton(Icons.refresh, true, () => _web?.reload()),
+            const SizedBox(width: 4),
             Expanded(
               child: TextField(
                 controller: _address,
@@ -100,6 +128,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
           Expanded(child: _webview()),
         ],
       ),
+    );
+  }
+
+  Widget _navButton(IconData icon, bool enabled, VoidCallback onPressed) {
+    return IconButton(
+      icon: Icon(icon),
+      onPressed: enabled ? onPressed : null,
+      iconSize: 20,
     );
   }
 
@@ -148,18 +184,37 @@ class _BrowserScreenState extends State<BrowserScreen> {
         domStorageEnabled: true,
         allowFileAccess: true,
         supportZoom: true,
+        useShouldInterceptAjaxRequest: false,
       ),
       onWebViewCreated: (c) => _web = c,
       onProgressChanged: (c, p) {
-        if (mounted) {
-          setState(() => _status = '加载中 $p% · 端口 ${_proxy.port}');
-        }
+        _setStatus('加载中 $p% · 端口 ${_proxy.port}');
       },
       onLoadStop: (c, url) {
         if (url != null) {
           _address.text = url.toString();
-          if (mounted) setState(() => _status = '就绪 · 端口 ${_proxy.port}');
+          _setStatus('就绪 · 端口 ${_proxy.port}');
         }
+      },
+      onUpdateVisitedHistory: (c, url, isReload) async {
+        final canBack = await c.canGoBack();
+        final canFwd = await c.canGoForward();
+        if (mounted) {
+          setState(() {
+            _canGoBack = canBack;
+            _canGoForward = canFwd;
+          });
+        }
+      },
+      onDownloadStart: (c, url) => _handleDownload(url),
+      onCreateWindow: (c, createWindowAction) async {
+        // target=_blank 弹窗：在当前 webview 内打开（不弹新窗口）。
+        final request = createWindowAction.request;
+        if (request != null) {
+          await c.loadUrl(urlRequest: request);
+          return true;
+        }
+        return false;
       },
       shouldInterceptRequest: _interceptor.onShouldInterceptRequest,
     );
