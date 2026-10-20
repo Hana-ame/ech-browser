@@ -204,10 +204,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
           });
         }
       },
-      onDownloadStartRequest: (c, request) async {
-        final u = request.url;
-        if (u != null) await _handleDownload(u);
-      },
+      onDownloadStartRequest: (c, request) => _handleDownload(request.url),
       onCreateWindow: (c, createWindowAction) async {
         // target=_blank 弹窗：在当前 webview 内打开（不弹新窗口）。
         await c.loadUrl(urlRequest: createWindowAction.request);
