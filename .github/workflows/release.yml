@@ -22,16 +22,19 @@ jobs:
             goarch: amd64
             out: ech-browser-linux-amd64.so
             cc: ""
+            ldflags: "-s -w"
           - target: windows-amd64
             goos: windows
             goarch: amd64
             out: ech-browser-windows-amd64.dll
             cc: x86_64-w64-mingw32-gcc
+            ldflags: "-s -w -extldflags=-static"
           - target: android-arm64
             goos: android
             goarch: arm64
             out: ech-browser-android-arm64.so
             cc: aarch64-linux-android21-clang
+            ldflags: "-s -w"
     steps:
       - uses: actions/checkout@v4
 
@@ -61,7 +64,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CC: ${{ matrix.cc }}
           CGO_ENABLED: "1"
-        run: go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o dist/${{ matrix.out }} ./engine/
+        run: go build -buildmode=c-shared -trimpath -ldflags="${{ matrix.ldflags }}" -o dist/${{ matrix.out }} ./engine/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -98,11 +101,30 @@ jobs:
           }
       - name: Build Windows release
         run: flutter build windows --release
+      - name: Stage release folder (exe + 全部运行库 + VC++ runtime)
+        shell: pwsh
+        run: |
+          # 关键：不能只打 exe。Flutter Windows 运行需要 flutter_windows.dll、
+          # 插件 dll、data/（icudtl.dat + flutter_assets），缺任一启动即报缺 dll。
+          $src = "build/windows/x64/runner/Release"
+          $dst = "stage/windows"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item -Recurse -Force "$src/*" $dst
+          # app-local VC++ runtime（避免用户机缺 msvcp140/vcruntime140）
+          $crt = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($crt) {
+            Copy-Item -Force "$($crt.FullName)\*.dll" $dst
+            Write-Host "VC runtime: $($crt.FullName)"
+          } else {
+            Write-Warning "VC++ CRT redist not found; relying on system runtime"
+          }
+          Write-Host "--- staged files ---"
+          Get-ChildItem $dst -Recurse | Select-Object FullName, Length
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: flutter-windows
-          path: build/windows/x64/runner/Release/
+          path: stage/windows/
 
   release:
     needs: [build-go, flutter-windows]
@@ -114,14 +136,27 @@ jobs:
           pattern: "*"
           path: dist
 
-      - name: Assemble Windows zip (exe + go dll)
+      - name: Assemble Windows zip (exe + 全部运行库 + go dll)
         run: |
           mkdir -p release/windows
-          cp dist/flutter-windows/ech_browser.exe release/windows/
+          # 整个 Release 目录进包：flutter_windows.dll / 插件 dll / data/ 缺一不可
+          cp -r dist/flutter-windows/. release/windows/
           # zip 内 dll 必须叫 echproxy.dll（Flutter 运行时 DynamicLibrary.open('echproxy.dll')）
           cp dist/go-windows-amd64/ech-browser-windows-amd64.dll release/windows/echproxy.dll
           (cd release/windows && zip -q -r ../ech-browser-windows-x64.zip .)
           ls -la release/
+
+      - name: Verify zip completeness (缺 dll 直接失败)
+        run: |
+          set -e
+          zipinfo -1 release/ech-browser-windows-x64.zip > /tmp/ziplist.txt
+          echo "--- zip contents ---"; cat /tmp/ziplist.txt
+          for f in ech_browser.exe echproxy.dll flutter_windows.dll; do
+            grep -qx "$f" /tmp/ziplist.txt || { echo "::error::zip 缺 $f"; exit 1; }
+          done
+          grep -q "^data/icudtl.dat$" /tmp/ziplist.txt || { echo "::error::zip 缺 data/icudtl.dat"; exit 1; }
+          grep -q "^data/flutter_assets/" /tmp/ziplist.txt || { echo "::error::zip 缺 data/flutter_assets/"; exit 1; }
+          echo "zip completeness OK"
 
       - name: Create release (idempotent, no assets)
         env:

@@ -36,8 +36,9 @@ go 内核（engine/，c-shared，复用 ech-proxy 的 ech 核心 + utls）
 
 ## 使用
 
-1. 从 Releases 下载 `ech-browser-windows-x64.zip`
-2. 解压双击 `ech_browser.exe`（`echproxy.dll` 必须与 exe 同目录）
+1. 从 Releases 下载 `ech-browser-windows-x64.zip`，**整个解压**（包内已含
+   `flutter_windows.dll`、插件 dll、`data/` 运行库与 VC++ runtime）
+2. 双击 `ech_browser.exe`（`echproxy.dll` 与运行库必须与 exe 同目录）
 3. 地址栏输入任意网址即可；状态栏显示内核端口，日志页可看内核诊断
 
 ## 已知边界与平台能力（v0.2.0）
