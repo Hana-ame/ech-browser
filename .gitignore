@@ -1,0 +1,19 @@
+# flutter
+.dart_tool/
+build/
+.flutter-plugins*
+.flutter-plugins-dependencies
+.metadata
+*.iml
+.idea/
+
+# go
+dist/
+engine/*.so
+engine/*.dll
+engine/*.exe
+engine/*.h
+
+# misc
+*.log
+.DS_Store

@@ -1,0 +1,124 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# 直接发布正式 Release，绝不产出 draft（同 ech-proxy 纪律）。
+permissions:
+  contents: write
+
+jobs:
+  build-go:
+    name: go c-shared (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            goos: linux
+            goarch: amd64
+            out: libechproxy.so
+            cc: ""
+          - target: windows-amd64
+            goos: windows
+            goarch: amd64
+            out: echproxy.dll
+            cc: x86_64-w64-mingw32-gcc
+          - target: android-arm64
+            goos: android
+            goarch: arm64
+            out: libechproxy.so
+            cc: aarch64-linux-android21-clang
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install mingw-w64 (windows target)
+        if: matrix.goos == 'windows'
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Setup Android NDK (android target)
+        if: matrix.goos == 'android'
+        run: |
+          NDK_VERSION="r27"
+          curl -L -o /tmp/ndk.zip "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          unzip -q /tmp/ndk.zip -d /tmp/
+          echo "/tmp/android-ndk-${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Tidy modules (CI-only)
+        run: go mod tidy
+
+      - name: Build c-shared
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CC: ${{ matrix.cc }}
+          CGO_ENABLED: "1"
+        run: go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o dist/${{ matrix.out }} ./engine/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-${{ matrix.target }}
+          path: dist/
+
+  flutter-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter pub get
+      - name: Generate Windows runner (if missing)
+        run: flutter create --platforms=windows --project-name ech_browser .
+      - name: Build Windows release
+        run: flutter build windows --release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-windows
+          path: build/windows/x64/runner/Release/
+
+  release:
+    needs: [build-go, flutter-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*"
+          path: dist
+
+      - name: Assemble Windows zip (exe + go dll)
+        run: |
+          mkdir -p release/windows
+          cp dist/flutter-windows/ech_browser.exe release/windows/
+          cp dist/go-windows-amd64/echproxy.dll release/windows/
+          (cd release/windows && zip -q -r ../ech-browser-windows-x64.zip .)
+          ls -la release/
+
+      - name: Create release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            release/ech-browser-windows-x64.zip \
+            dist/go-linux-amd64/libechproxy.so \
+            dist/go-windows-amd64/echproxy.dll \
+            dist/go-android-arm64/libechproxy.so \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --notes "ech-browser ${{ github.ref_name }} — 点开即用的**通用** ECH 独立浏览器（flutter 壳 + go ech 内核）。任意 http(s) 网址可访问；webview 拦截请求交给 go 内核做 ECH/SNI 伪装直连，**无需修改系统 hosts、无需手动安装证书**。
+
+            - \`ech-browser-windows-x64.zip\`：Windows 桌面版（exe + echproxy.dll 同目录即用）
+            - \`libechproxy.so\`（linux / android-arm64）、\`echproxy.dll\`（windows）：go 内核 c-shared 库
+
+            测试仅在 CI 执行（本仓禁止本地测试）。"

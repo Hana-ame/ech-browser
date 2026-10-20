@@ -1,0 +1,87 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 本仓纪律：禁止本地测试。所有编译/测试/静态检查只在 CI 执行。
+jobs:
+  go-cshared:
+    name: go c-shared (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            goos: linux
+            goarch: amd64
+            out: libechproxy.so
+            cc: ""
+          - target: windows-amd64
+            goos: windows
+            goarch: amd64
+            out: echproxy.dll
+            cc: x86_64-w64-mingw32-gcc
+          - target: android-arm64
+            goos: android
+            goarch: arm64
+            out: libechproxy.so
+            cc: aarch64-linux-android21-clang
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install mingw-w64 (windows target)
+        if: matrix.goos == 'windows'
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Setup Android NDK (android target)
+        if: matrix.goos == 'android'
+        run: |
+          NDK_VERSION="r27"
+          curl -L -o /tmp/ndk.zip "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          unzip -q /tmp/ndk.zip -d /tmp/
+          echo "/tmp/android-ndk-${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Tidy modules (CI-only)
+        run: go mod tidy
+
+      - name: Build c-shared
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CC: ${{ matrix.cc }}
+          CGO_ENABLED: "1"
+        run: go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o dist/${{ matrix.out }} ./engine/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-${{ matrix.target }}
+          path: dist/
+
+  flutter-analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter pub get
+      - run: flutter analyze
+
+  flutter-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter pub get
+      - run: flutter test
