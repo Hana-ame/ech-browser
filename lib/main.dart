@@ -80,13 +80,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (mounted) setState(() => _status = s);
   }
 
-  Future<void> _handleDownload(String url) async {
-    final uri = Uri.tryParse(url);
-    if (uri == null) return;
-    _setStatus('下载中：$url');
+  Future<void> _handleDownload(Uri uri) async {
+    _setStatus('下载中：${uri.toString()}');
     final bytes = await _interceptor.fetchBytes(uri);
     if (bytes == null || !mounted) {
-      _setStatus('下载失败：$url（已放行直连）');
+      _setStatus('下载失败：${uri.toString()}（已放行直连）');
       return;
     }
     final dir = await Directory.systemTemp.createTemp('ech-browser-dl');
@@ -209,12 +207,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
       onDownloadStart: (c, url) => _handleDownload(url),
       onCreateWindow: (c, createWindowAction) async {
         // target=_blank 弹窗：在当前 webview 内打开（不弹新窗口）。
-        final request = createWindowAction.request;
-        if (request != null) {
-          await c.loadUrl(urlRequest: request);
-          return true;
-        }
-        return false;
+        await c.loadUrl(urlRequest: createWindowAction.request);
+        return true;
       },
       shouldInterceptRequest: _interceptor.onShouldInterceptRequest,
     );
