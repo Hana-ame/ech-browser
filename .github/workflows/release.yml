@@ -120,6 +120,42 @@ jobs:
           }
           Write-Host "--- staged files ---"
           Get-ChildItem $dst -Recurse | Select-Object FullName, Length
+      - name: Smoke test — 真的启动 exe + 验证 go 内核在跑
+        shell: pwsh
+        run: |
+          # 「构建通过」不等于「能启动」：缺 dll 时 Windows 加载器直接拒绝创建进程。
+          # 这里做两件事：① 启动 exe 并确认 10s 后仍存活；② curl 内核回环端口，
+          # 确认 go 内核真的起来了（App 启动即 StartProxy）。
+          $exe = "stage/windows/ech_browser.exe"
+          if (-not (Test-Path $exe)) { Write-Error "missing exe: $exe"; exit 1 }
+          $p = Start-Process -FilePath $exe -PassThru `
+                 -RedirectStandardOutput "smoke.out.txt" -RedirectStandardError "smoke.err.txt"
+          Start-Sleep -Seconds 10
+          Write-Host "--- stdout ---"; Get-Content smoke.out.txt -ErrorAction SilentlyContinue
+          Write-Host "--- stderr ---"; Get-Content smoke.err.txt -ErrorAction SilentlyContinue
+          if ($p.HasExited) {
+            $code = $p.ExitCode
+            Write-Error ("app exited early, exit code: 0x{0:X8} (0xC0000135=DLL_NOT_FOUND, 0xC000007B=BAD_IMAGE)" -f $code)
+            exit 1
+          }
+          Write-Host "app alive after 10s (pid $($p.Id))"
+          # go 内核端口探活（优先 8443；App 若因占用退回随机端口则这里会失败——
+          # runner 上 8443 空闲，正常应命中）
+          $kernelOK = $false
+          for ($i = 0; $i -lt 10; $i++) {
+            try {
+              $r = Invoke-WebRequest -Uri "http://127.0.0.1:8443/logs" -TimeoutSec 3 -UseBasicParsing
+              if ($r.StatusCode -eq 200) { $kernelOK = $true; break }
+            } catch { Start-Sleep -Seconds 2 }
+          }
+          if (-not $kernelOK) {
+            Write-Error "go 内核端口 127.0.0.1:8443 未响应（StartProxy 未起来）"
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            exit 1
+          }
+          Write-Host "go kernel responded on 127.0.0.1:8443"
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Write-Host "smoke test passed"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

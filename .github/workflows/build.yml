@@ -88,3 +88,73 @@ jobs:
           channel: stable
       - run: flutter pub get
       - run: flutter test
+
+  # 每次 push 都真跑一次：构建 Windows exe → 启动存活检查 → curl go 内核端口。
+  # 「构建通过 ≠ 能启动」（v0.2.0 缺 dll 事故），本 job 是那次事故的兜底。
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter pub get
+      - name: Generate Windows runner (if missing)
+        run: flutter create --platforms=windows --project-name ech_browser .
+      - name: Patch flutter_inappwebview_windows CMake (MSVC 14.51 STL1011)
+        shell: pwsh
+        run: |
+          $plug = Get-ChildItem "$env:LOCALAPPDATA\Pub\Cache\hosted\pub.dev" -Directory -Filter "flutter_inappwebview_windows-*" | Select-Object -First 1
+          $cm = Join-Path $plug.FullName "windows\CMakeLists.txt"
+          $anchor = "project(`${PROJECT_NAME} LANGUAGES CXX)"
+          $inject = "add_definitions(-D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)"
+          $text = Get-Content $cm -Raw
+          if ($text -notmatch "SILENCE_EXPERIMENTAL_COROUTINE") {
+            $text = $text.Replace($anchor, "$anchor`n$inject")
+            Set-Content $cm $text
+            Write-Host "patched: $cm"
+          } else {
+            Write-Host "already patched: $cm"
+          }
+      - name: Build Windows release
+        run: flutter build windows --release
+      - name: Stage release folder (exe + 全部运行库 + VC++ runtime)
+        shell: pwsh
+        run: |
+          $src = "build/windows/x64/runner/Release"
+          $dst = "stage/windows"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item -Recurse -Force "$src/*" $dst
+          $crt = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($crt) { Copy-Item -Force "$($crt.FullName)\*.dll" $dst }
+          Get-ChildItem $dst | Select-Object Name
+      - name: Smoke test — 真的启动 exe + 验证 go 内核在跑
+        shell: pwsh
+        run: |
+          $exe = "stage/windows/ech_browser.exe"
+          if (-not (Test-Path $exe)) { Write-Error "missing exe: $exe"; exit 1 }
+          $p = Start-Process -FilePath $exe -PassThru `
+                 -RedirectStandardOutput "smoke.out.txt" -RedirectStandardError "smoke.err.txt"
+          Start-Sleep -Seconds 10
+          Write-Host "--- stdout ---"; Get-Content smoke.out.txt -ErrorAction SilentlyContinue
+          Write-Host "--- stderr ---"; Get-Content smoke.err.txt -ErrorAction SilentlyContinue
+          if ($p.HasExited) {
+            Write-Error ("app exited early, exit code: 0x{0:X8} (0xC0000135=DLL_NOT_FOUND, 0xC000007B=BAD_IMAGE)" -f $p.ExitCode)
+            exit 1
+          }
+          Write-Host "app alive after 10s (pid $($p.Id))"
+          $kernelOK = $false
+          for ($i = 0; $i -lt 10; $i++) {
+            try {
+              $r = Invoke-WebRequest -Uri "http://127.0.0.1:8443/logs" -TimeoutSec 3 -UseBasicParsing
+              if ($r.StatusCode -eq 200) { $kernelOK = $true; break }
+            } catch { Start-Sleep -Seconds 2 }
+          }
+          if (-not $kernelOK) {
+            Write-Error "go 内核端口 127.0.0.1:8443 未响应（StartProxy 未起来）"
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            exit 1
+          }
+          Write-Host "go kernel responded on 127.0.0.1:8443"
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Write-Host "smoke test passed"
