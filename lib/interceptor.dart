@@ -34,8 +34,7 @@ class Interceptor {
     if (port <= 0) return null;
 
     final client = io.HttpClient()
-      ..connectionTimeout = const Duration(seconds: 30)
-      ..followRedirects = false;
+      ..connectionTimeout = const Duration(seconds: 30);
 
     try {
       final local = localTarget(port, url);
