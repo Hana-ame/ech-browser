@@ -181,10 +181,11 @@ jobs:
           #   ① 内核必须起来，且能真的发一次 ECH/SNI 上游请求（curl + Host 头）
           #   ② 进程退出码分级：缺 dll(0xC0000135)/坏镜像(0xC000007B) 判失败；
           #      访问违例(0xC0000005) 在无头环境记警告（WebView2 限制）
-          $exe = "stage/windows/ech_browser.exe"
+          $dir = "release/windows"
+          $exe = "$dir/ech_browser.exe"
           if (-not (Test-Path $exe)) { Write-Error "missing exe: $exe"; exit 1 }
           $p = Start-Process -FilePath $exe -PassThru `
-                 -RedirectStandardOutput "smoke.out.txt" -RedirectStandardError "smoke.err.txt"
+                 -RedirectStandardOutput "$dir/smoke.out.txt" -RedirectStandardError "$dir/smoke.err.txt"
           $kernelOK = $false; $echOK = $false
           for ($i = 0; $i -lt 25; $i++) {
             if (-not $kernelOK) {
@@ -206,7 +207,7 @@ jobs:
             Start-Sleep -Seconds 1
           }
           Write-Host "--- stderr (tail) ---"
-          Get-Content "smoke.err.txt" -ErrorAction SilentlyContinue | Select-Object -Last 12
+          Get-Content "$dir/smoke.err.txt" -ErrorAction SilentlyContinue | Select-Object -Last 12
           $exited = $p.HasExited; $code = if ($exited) { $p.ExitCode } else { 0 }
           if (-not $exited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
           if (-not $kernelOK) { Write-Error "内核端口 8443 从未响应（StartProxy 失败）"; exit 1 }
