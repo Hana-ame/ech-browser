@@ -41,7 +41,7 @@ class Interceptor {
       final req = await client.openUrl(request.method ?? 'GET', local);
       req.headers.set(io.HttpHeaders.hostHeader, url.host);
 
-      request.headers?.forEach((key, value) {
+      request.headers.forEach((key, value) {
         final k = key.toLowerCase();
         if (k == 'host' || _hopByHop.contains(k)) return;
         req.headers.set(key, value ?? '');
