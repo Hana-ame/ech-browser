@@ -260,7 +260,19 @@ jobs:
           Write-Host "kernel OK; ECH request OK=$echOK"
           Start-Sleep -Seconds 5
           Write-Host "after idle 5s: exited=$($p.HasExited)"
-          if ($p.HasExited) { Write-Host ("idle exit code: 0x{0:X8}" -f $p.ExitCode) }
+          if ($p.HasExited) {
+            Write-Host ("idle exit code: 0x{0:X8}" -f $p.ExitCode)
+            Write-Host "--- Defender threat detections (若命中=杀软误杀) ---"
+            Get-MpThreatDetection -ErrorAction SilentlyContinue | Select-Object -First 5 | Format-List InitialDetectionTime, ProcessName, Resources
+            Write-Host "--- Application event log (ech_browser) ---"
+            Get-WinEvent -LogName Application -MaxEvents 40 -ErrorAction SilentlyContinue |
+              Where-Object { $_.Message -match 'ech_browser|echproxy' } | Select-Object -First 5 |
+              Format-List TimeCreated, Id, ProviderName, Message
+            Write-Host "--- stderr (full) ---"
+            Get-Content "$dir/smoke.err.txt" -ErrorAction SilentlyContinue
+            Write-Error "进程空闲期自行退出（与用户侧闪退同症状），见上方诊断"
+            exit 1
+          }
           # 验证请求处理链的 panic 兜底：/__panic 必须返回 500 且进程不退出。
           # （Go handler goroutine 里未 recover 的 panic 会 abort 整个进程 = 闪退）
           # 用 curl.exe 取原始状态码（Invoke-WebRequest 对异常响应会抛发送错误）
