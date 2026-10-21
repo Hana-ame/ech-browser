@@ -115,3 +115,8 @@ CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC=aarch64-linux-android21-clang go buil
 
 > v0.3.2 起：请求处理链的 panic 已被兜底（返回 500 错误页而不 abort 整个进程），
 > 并新增上述两个落盘日志；CI smoke 也会验证 panic 兜底生效。
+
+## 已知问题
+
+全部问题（已修 / 未修 / 平台限制 / 环境性 / 工程坑）如实记录在
+[ISSUES.md](ISSUES.md)，含每条取证方式与当前状态。
