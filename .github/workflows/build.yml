@@ -110,6 +110,7 @@ jobs:
   # 「构建通过 ≠ 能启动」（v0.2.0 缺 dll 事故），本 job 是那次事故的兜底。  # 诊断（非门禁）：区分崩溃来自 Impeller 还是拦截桥。
   windows-diagnose:
     needs: [go-cshared]
+    continue-on-error: true
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -134,7 +135,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path stage/windows | Out-Null
-          Copy-Item -Recurse -Force "build/windows/x64/release/bundle/*" stage/windows/
+          Copy-Item -Recurse -Force "build/windows/x64/runner/Release/*" stage/windows/
           $crt = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($crt) { Copy-Item -Force "$($crt.FullName)\*.dll" stage/windows }
           Copy-Item -Force "godll/echproxy.dll" "stage/windows/echproxy.dll"
