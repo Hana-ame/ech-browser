@@ -466,6 +466,7 @@ func router(w http.ResponseWriter, r *http.Request) {
 			})
 		case "/__panic":
 			// 自检路由：验证 recover 中间件生效（CI smoke 使用；仅本机回环可达）。
+			log.Printf("SELF-TEST: /__panic requested, panicking now")
 			panic("smoke-test panic")
 		case "/logs":
 			logMu.RLock()
