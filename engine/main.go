@@ -549,6 +549,10 @@ func forward(w http.ResponseWriter, r *http.Request) {
 			req.Header.Add(k, v)
 		}
 	}
+	// 关键：不向上游索取压缩响应。拦截层（WebResourceResponse）不保证做
+	// Content-Encoding 解码，gzip 体会被 WebView2 当二进制渲染成乱码。
+	// 统一 identity，并剥掉响应里的 Content-Encoding。
+	req.Header.Set("Accept-Encoding", "identity")
 	if ua := req.Header.Get("User-Agent"); ua == "" {
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 	}
@@ -567,6 +571,10 @@ func forward(w http.ResponseWriter, r *http.Request) {
 
 	for k, vs := range resp.Header {
 		if hopByHop[http.CanonicalHeaderKey(k)] || hopByHop[k] {
+			continue
+		}
+		// 上游若无视 identity 仍回了压缩体，剥掉编码声明避免 webview 误判
+		if http.CanonicalHeaderKey(k) == "Content-Encoding" {
 			continue
 		}
 		for _, v := range vs {
