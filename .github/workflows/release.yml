@@ -267,13 +267,13 @@ jobs:
           }
 
           $kernelOK = $false; $echOK = $false
-          for ($i = 0; $i -lt 30; $i++) {
+          for ($i = 0; $i -lt 60; $i++) {
             if (-not $kernelOK) {
               try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:8443/logs" -TimeoutSec 3 -UseBasicParsing
                      if ($r.StatusCode -eq 200) { $kernelOK = $true } } catch { }
             }
             if ($kernelOK -and -not $echOK) {
-              try { $r2 = Invoke-WebRequest -Uri "http://127.0.0.1:8443/" -Headers @{ Host = "www.pixiv.net" } -TimeoutSec 20 -UseBasicParsing
+              try { $r2 = Invoke-WebRequest -Uri "http://127.0.0.1:8443/" -Headers @{ Host = "www.pixiv.net" } -TimeoutSec 30 -UseBasicParsing
                      if ($r2.StatusCode -ge 200 -and $r2.StatusCode -lt 500) { $echOK = $true; Write-Host "ECH upstream via kernel: HTTP $($r2.StatusCode)" } } catch { }
             }
             if ($kernelOK -and $echOK) { break }
