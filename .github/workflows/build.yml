@@ -92,7 +92,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          # 钉 3.27.x：Windows 默认仍是 Skia；3.29+ 默认 Impeller，
+          # 与 flutter_inappwebview/FFI 组合会 0xC0000005（flutter#188635）
+          flutter-version: 3.27.4
       - run: flutter pub get
       - run: flutter analyze
 
@@ -102,7 +104,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          # 钉 3.27.x：Windows 默认仍是 Skia；3.29+ 默认 Impeller，
+          # 与 flutter_inappwebview/FFI 组合会 0xC0000005（flutter#188635）
+          flutter-version: 3.27.4
       - run: flutter pub get
       - run: flutter test
 
@@ -120,7 +124,9 @@ jobs:
           path: godll
       - uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          # 钉 3.27.x：Windows 默认仍是 Skia；3.29+ 默认 Impeller，
+          # 与 flutter_inappwebview/FFI 组合会 0xC0000005（flutter#188635）
+          flutter-version: 3.27.4
       - run: flutter pub get
       - name: Generate Windows runner (if missing)
         run: flutter create --platforms=windows --project-name ech_browser .
