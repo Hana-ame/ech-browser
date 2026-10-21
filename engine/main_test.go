@@ -103,3 +103,15 @@ func TestRouterStatusAndMetadataBlock(t *testing.T) {
 		t.Fatalf("expected 403 Forbidden for metadata SSRF, got %d", recMeta.Code)
 	}
 }
+
+// TestSafeHandlerRecoversPanic 验证请求处理链最外层能接住 handler panic：
+// 这是"页面一加载就闪退"（panic 逃逸 abort 进程）的回归测试。
+func TestSafeHandlerRecoversPanic(t *testing.T) {
+	h := safeHandler(router)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8443/__panic", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req) // 不应把 panic 抛出去（抛出去在 c-shared 场景会 abort 进程）
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500, got %d", rec.Code)
+	}
+}

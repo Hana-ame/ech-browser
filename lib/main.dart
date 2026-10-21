@@ -445,6 +445,13 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   Widget _webview() {
     if (_starting) return const Center(child: CircularProgressIndicator());
+    // CI smoke 专用：ECH_HEADLESS=1 时不创建 webview，只让内核跑起来被 curl 验证。
+    // 无头 Windows runner 上 WebView2/GPU 初始化偶发访问违例，会污染 smoke 结论。
+    if (Platform.environment['ECH_HEADLESS'] == '1') {
+      return const Center(
+          child: Text('headless smoke mode（未创建 webview）',
+              style: TextStyle(color: Colors.white70)));
+    }
     return InAppWebView(
       initialUrlRequest: URLRequest(url: WebUri(kHomePage)),
       initialUserScripts: UnmodifiableListView<UserScript>([

@@ -227,6 +227,7 @@ jobs:
           #   ② 进程退出码分级：缺 dll(0xC0000135)/坏镜像(0xC000007B) 判失败；
           #      访问违例(0xC0000005) 在无头环境记警告（WebView2 限制）
           $dir = "release/windows"
+          $env:ECH_HEADLESS = "1"   # smoke 只验证内核；无头 WebView2 渲染有偶发崩溃
           $exe = "$dir/ech_browser.exe"
           if (-not (Test-Path $exe)) { Write-Error "missing exe: $exe"; exit 1 }
           $p = Start-Process -FilePath $exe -PassThru `
@@ -265,6 +266,8 @@ jobs:
           if ($p.HasExited) {
             Write-Host "--- kernel.log tail ---"
             Get-Content "$env:USERPROFILE\.ech-browser\kernel.log" -ErrorAction SilentlyContinue | Select-Object -Last 15
+            Write-Host "--- stderr tail after panic ---"
+            Get-Content "$dir/smoke.err.txt" -ErrorAction SilentlyContinue | Select-Object -Last 15
             Write-Error "panic 后进程退出（recover 未生效，闪退风险）"
             exit 1
           }
