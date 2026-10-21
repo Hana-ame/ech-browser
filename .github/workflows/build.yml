@@ -154,105 +154,60 @@ jobs:
           if (-not (Test-Path "godll/echproxy.dll")) { Write-Error "go-windows-amd64 artifact 缺 echproxy.dll"; exit 1 }
           Copy-Item -Force "godll/echproxy.dll" "$dst/echproxy.dll"
           Get-ChildItem $dst | Select-Object Name
-      - name: Bisect — 不加载内核时进程是否稳定（区分壳 vs 内核）
+      - name: Smoke test — GUI 真拉起 + 内核 ECH + panic 兜底 + 存活 10s
         shell: pwsh
         run: |
-          # 两轮对照：① 跳过内核 ② 正常启动。都只跑 8s 看是否自行退出。
-          foreach ($mode in @("nokernel", "kernel")) {
-            if ($mode -eq "nokernel") { $env:ECH_NO_KERNEL = "1"; $env:ECH_HEADLESS = "1" }
-            else { Remove-Item Env:ECH_NO_KERNEL -ErrorAction SilentlyContinue; $env:ECH_HEADLESS = "1" }
-            $p = Start-Process -FilePath "stage/windows/ech_browser.exe" -WorkingDirectory "stage/windows" -PassThru `
-                   -RedirectStandardOutput "bisect-$mode.out.txt" -RedirectStandardError "bisect-$mode.err.txt"
-            Start-Sleep -Seconds 8
-            $exited = $p.HasExited
-            $code = if ($exited) { $p.ExitCode } else { 0 }
-            Write-Host ("bisect[$mode]: exited={0} code=0x{1:X8}" -f $exited, $code)
-            if (-not $exited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-          }
+          $exe = "{d}/ech_browser.exe"
+          if (-not (Test-Path $exe)) {{ Write-Error "missing exe: $exe"; exit 1 }}
+          $p = Start-Process -FilePath $exe -WorkingDirectory "{d}" -PassThru `
+                 -RedirectStandardOutput "{d}/smoke.out.txt" -RedirectStandardError "{d}/smoke.err.txt"
 
-      - name: Smoke test — 内核真干活（curl 内核 + ECH 请求）+ 崩溃码分级
-        shell: pwsh
-        run: |
-          # 无头 runner 上 WebView2 可能无法创建（GUI 环境缺失）→ 进程可能以
-          # 0xC0000005 退出，这**不是**产品缺陷。因此分两层验证：
-          #   ① 内核必须起来，且能真的发一次 ECH/SNI 上游请求（curl + Host 头）
-          #   ② 进程退出码分级：缺 dll(0xC0000135)/坏镜像(0xC000007B) 判失败；
-          #      访问违例(0xC0000005) 在无头环境记警告（WebView2 限制）
-          $env:ECH_HEADLESS = "1"   # smoke 只验证内核；无头 WebView2 渲染有偶发崩溃
-          $exe = "stage/windows/ech_browser.exe"
-          if (-not (Test-Path $exe)) { Write-Error "missing exe: $exe"; exit 1 }
-          $p = Start-Process -FilePath $exe -PassThru `
-                 -RedirectStandardOutput "smoke.out.txt" -RedirectStandardError "smoke.err.txt"
-          $kernelOK = $false; $echOK = $false
-          for ($i = 0; $i -lt 25; $i++) {
-            if (-not $kernelOK) {
-              try {
-                $r = Invoke-WebRequest -Uri "http://127.0.0.1:8443/logs" -TimeoutSec 3 -UseBasicParsing
-                if ($r.StatusCode -eq 200) { $kernelOK = $true; Write-Host "kernel up after $($i+1)s" }
-              } catch { }
-            }
-            if ($kernelOK -and -not $echOK) {
-              try {
-                $r2 = Invoke-WebRequest -Uri "http://127.0.0.1:8443/" -Headers @{ Host = "www.pixiv.net" } -TimeoutSec 20 -UseBasicParsing
-                if ($r2.StatusCode -ge 200 -and $r2.StatusCode -lt 500) {
-                  $echOK = $true; Write-Host "ECH upstream request via kernel: HTTP $($r2.StatusCode)"
-                }
-              } catch { Write-Host "ech probe: $($_.Exception.Message)" }
-            }
-            if ($kernelOK -and $echOK) { break }
-            if ($p.HasExited) { break }
+          # 1) GUI 必须真的出现：主窗口句柄非零
+          $windowOK = $false
+          for ($i = 0; $i -lt 30; $i++) {{
+            if ($p.HasExited) {{ break }}
+            $p.Refresh()
+            if ($p.MainWindowHandle -ne 0) {{ $windowOK = $true; break }}
             Start-Sleep -Seconds 1
-          }
-          Write-Host "--- stderr (tail) ---"
-          Get-Content "smoke.err.txt" -ErrorAction SilentlyContinue | Select-Object -Last 12
-          $exited = $p.HasExited; $code = if ($exited) { $p.ExitCode } else { 0 }
-          if (-not $exited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-          if (-not $kernelOK) { Write-Error "内核端口 8443 从未响应（StartProxy 失败）"; exit 1 }
-          Write-Host "kernel OK; ECH request OK=$echOK"
-          Start-Sleep -Seconds 5
-          Write-Host "after idle 5s: exited=$($p.HasExited)"
-          if ($p.HasExited) {
-            Write-Host ("idle exit code: 0x{0:X8}" -f $p.ExitCode)
-            Write-Host "--- Defender threat detections (若命中=杀软误杀) ---"
-            Get-MpThreatDetection -ErrorAction SilentlyContinue | Select-Object -First 5 | Format-List InitialDetectionTime, ProcessName, Resources
-            Write-Host "--- Application event log (ech_browser) ---"
-            Get-WinEvent -LogName Application -MaxEvents 40 -ErrorAction SilentlyContinue |
-              Where-Object { $_.Message -match 'ech_browser|echproxy' } | Select-Object -First 5 |
-              Format-List TimeCreated, Id, ProviderName, Message
-            Write-Host "--- stderr (full) ---"
-            Get-Content "smoke.err.txt" -ErrorAction SilentlyContinue
-            Write-Error "进程空闲期自行退出（与用户侧闪退同症状），见上方诊断"
-            exit 1
-          }
-          # 验证请求处理链的 panic 兜底：/__panic 必须返回 500 且进程不退出。
-          # （Go handler goroutine 里未 recover 的 panic 会 abort 整个进程 = 闪退）
-          # 用 curl.exe 取原始状态码（Invoke-WebRequest 对异常响应会抛发送错误）
-          $code = & curl.exe -s -o NUL -w "%{http_code}" --max-time 15 "http://127.0.0.1:8443/__panic"
-          Write-Host "panic endpoint http_code=$code exited=$($p.HasExited)"
-          if ($p.HasExited) {
-            Write-Host ("exit code: 0x{0:X8}" -f $p.ExitCode)
-            Write-Host "--- kernel.log (full) ---"
-            Get-Content "$env:USERPROFILE\.ech-browser\kernel.log" -ErrorAction SilentlyContinue
-            Write-Host "--- stderr (full) ---"
-            Get-Content "smoke.err.txt" -ErrorAction SilentlyContinue
-            Write-Error "panic 后进程退出（recover 未生效，闪退风险）"
-            exit 1
-          }
-          if ($code -ne "500") { Write-Error "panic 兜底异常：http_code=$code"; exit 1 }
-          $code2 = & curl.exe -s -o NUL -w "%{http_code}" --max-time 10 "http://127.0.0.1:8443/health"
-          if ($code2 -ne "200") { Write-Error "panic 后内核 /health=$code2（进程可能已崩溃）"; exit 1 }
-          Write-Host "panic recovery OK; process alive"
-          if ($exited) {
-            $hex = "0x{0:X8}" -f $code
-            Write-Host "process exited: $hex"
-            if ($code -eq 0xC0000135 -or $code -eq 0xC000007B) {
-              Write-Error "缺 dll / 坏镜像（$hex）——打包不完整"; exit 1
-            }
-            if ($code -eq 0xC0000005) {
-              Write-Warning "无头环境访问违例（$hex）：多为 WebView2 无 GUI 会话所致；内核已验证可用"
-            } else {
-              Write-Warning "进程提前退出（$hex）：非缺 dll 类；内核已验证可用"
-            }
-          } else {
-            Write-Host "process alive; smoke passed"
-          }
+          }}
+          Write-Host "GUI window: $windowOK (MainWindowHandle=$($p.MainWindowHandle))"
+          if (-not $windowOK) {{
+            Write-Host "--- stderr (full) ---"; Get-Content "{d}/smoke.err.txt" -ErrorAction SilentlyContinue
+            Write-Error "GUI 未拉起（主窗口句柄为 0 或进程已退出）"; exit 1
+          }}
+
+          # 2) 内核端口 + 真实 ECH 上游请求（curl + Host 头）
+          $kernelOK = $false; $echOK = $false
+          for ($i = 0; $i -lt 30; $i++) {{
+            if (-not $kernelOK) {{
+              try {{ $r = Invoke-WebRequest -Uri "http://127.0.0.1:8443/logs" -TimeoutSec 3 -UseBasicParsing
+                     if ($r.StatusCode -eq 200) {{ $kernelOK = $true }} }} catch {{ }}
+            }}
+            if ($kernelOK -and -not $echOK) {{
+              try {{ $r2 = Invoke-WebRequest -Uri "http://127.0.0.1:8443/" -Headers @{{ Host = "www.pixiv.net" }} -TimeoutSec 20 -UseBasicParsing
+                     if ($r2.StatusCode -ge 200 -and $r2.StatusCode -lt 500) {{ $echOK = $true; Write-Host "ECH upstream via kernel: HTTP $($r2.StatusCode)" }} }} catch {{ }}
+            }}
+            if ($kernelOK -and $echOK) {{ break }}
+            if ($p.HasExited) {{ break }}
+            Start-Sleep -Seconds 1
+          }}
+          if (-not $kernelOK) {{ Write-Host "--- stderr ---"; Get-Content "{d}/smoke.err.txt" -ErrorAction SilentlyContinue; Write-Error "内核端口 8443 未响应"; exit 1 }}
+          if (-not $echOK) {{ Write-Error "内核 ECH 上游请求失败"; exit 1 }}
+
+          # 3) 请求链 panic 兜底：/__panic 必须 500 且进程不退出
+          $code = & curl.exe -s -o NUL -w "%{{http_code}}" --max-time 15 "http://127.0.0.1:8443/__panic"
+          if ($p.HasExited) {{ Write-Host "--- stderr (full) ---"; Get-Content "{d}/smoke.err.txt" -ErrorAction SilentlyContinue; Write-Error "panic 后进程退出（recover 未生效）"; exit 1 }}
+          if ($code -ne "500") {{ Write-Error "panic 兜底异常 http_code=$code"; exit 1 }}
+          $code2 = & curl.exe -s -o NUL -w "%{{http_code}}" --max-time 10 "http://127.0.0.1:8443/health"
+          if ($code2 -ne "200") {{ Write-Error "panic 后 /health=$code2"; exit 1 }}
+
+          # 4) GUI 稳定存活 10 秒 + 窗口句柄仍在
+          Start-Sleep -Seconds 10
+          $p.Refresh()
+          if ($p.HasExited) {{
+            Write-Host "--- stderr (full) ---"; Get-Content "{d}/smoke.err.txt" -ErrorAction SilentlyContinue
+            Write-Error ("GUI 在 10s 内退出 code=0x{{0:X8}}" -f $p.ExitCode); exit 1
+          }}
+          if ($p.MainWindowHandle -eq 0) {{ Write-Error "10s 后窗口句柄消失"; exit 1 }}
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Write-Host "smoke passed: GUI up + kernel ECH 200 + panic recovered + stable 10s"

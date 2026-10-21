@@ -15,18 +15,22 @@ import 'settings_store.dart';
 /// 任意 http(s) 网址可访问；webview 请求经拦截交给本地 go 内核，
 /// 免改系统 hosts、免手动安装证书。目标：与普通浏览器使用体验无异。
 void main() {
+  // 注意：WidgetsFlutterBinding 必须在 zone 外初始化。
+  // 把 ensureInitialized 放进 runZonedGuarded 是 Flutter 已知反模式：平台回调
+  // 在根 zone 触发，与自定义 zone 的 timer/microtask 语义错位，表现为进程
+  // 几秒后静默退出（Windows 退出码 -1）。
+  WidgetsFlutterBinding.ensureInitialized();
+  FlutterError.onError = (details) {
+    CrashLog.write('flutter', details.exception, details.stack);
+    FlutterError.presentError(details);
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    CrashLog.write('platform', error, stack);
+    return true;
+  };
   // 全局兜底：任何未捕获的 Dart 异常都落盘，闪退后可通过
   // ~/.ech-browser/crash.log（或临时目录同名文件）回传定位。
   runZonedGuarded(() {
-    WidgetsFlutterBinding.ensureInitialized();
-    FlutterError.onError = (details) {
-      CrashLog.write('flutter', details.exception, details.stack);
-      FlutterError.presentError(details);
-    };
-    PlatformDispatcher.instance.onError = (error, stack) {
-      CrashLog.write('platform', error, stack);
-      return true;
-    };
     runApp(const EchBrowserApp());
   }, (error, stack) {
     CrashLog.write('zone', error, stack);
