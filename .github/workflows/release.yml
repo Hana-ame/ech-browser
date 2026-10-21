@@ -264,7 +264,7 @@ jobs:
           $code = & curl.exe -s -o NUL -w "%{http_code}" --max-time 15 "http://127.0.0.1:8443/__panic"
           Write-Host "panic endpoint http_code=$code exited=$($p.HasExited)"
           if ($p.HasExited) {
-            Write-Host "exit code: 0x{0:X8}" -f $p.ExitCode
+            Write-Host ("exit code: 0x{0:X8}" -f $p.ExitCode)
             Write-Host "--- kernel.log (full) ---"
             Get-Content "$env:USERPROFILE\.ech-browser\kernel.log" -ErrorAction SilentlyContinue
             Write-Host "--- stderr (full) ---"
