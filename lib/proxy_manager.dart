@@ -1,6 +1,5 @@
 import 'dart:ffi';
 import 'dart:io';
-import 'dart:isolate';
 import 'package:ffi/ffi.dart';
 
 /// go 内核（engine/main.go）的 Dart FFI 绑定。
@@ -139,33 +138,25 @@ class ProxyManager {
   }
 
   /// 启动代理并绑定回环端口（返回端口号，0 = 失败）。
-  /// 捕获 Isolate 内异常，防止动态库缺失时卡死 UI 启动流程。
-  Future<int> start({String? bootstrapIp}) async {
+  ///
+  /// 注意：**必须在主 isolate 直接调用**，不要放进 Isolate.run。
+  /// go 运行时（c-shared）的 HTTP 服务 goroutine 是从这次 FFI 调用延伸出来的，
+  /// 放在短命 isolate 里会在 isolate 销毁后与 Dart 线程生命周期冲突（实测
+  /// 内核首个 panic 路径即整进程退出）。v0.3.0 起 StartProxy 不做站点探测，
+  /// 绑定即就绪，调用很快，直接调用不会冻 UI。
+  Future<int> start() async {
     try {
-      final bs = bootstrapIp?.trim() ?? '';
-      final port = await Isolate.run<int>(() {
-        final lib = _open();
-        final startFn = lib.lookupFunction<Uint16 Function(Pointer<Utf8>),
-            int Function(Pointer<Utf8>)>('StartProxy');
-        if (bs.isEmpty) {
-          return startFn(nullptr);
-        }
-        final ptr = bs.toNativeUtf8();
-        try {
-          return startFn(ptr);
-        } finally {
-          calloc.free(ptr);
-        }
-      });
+      final lib = _open();
+      final start = lib.lookupFunction<Uint16 Function(Pointer<Utf8>),
+          int Function(Pointer<Utf8>)>('StartProxy');
+      final port = start(nullptr);
       _port = port;
-      if (port <= 0 && _lastError.isEmpty) {
-        final err = initLastError();
-        _lastError = err.isNotEmpty ? err : '端口绑定失败';
+      if (port <= 0) {
+        _lastError = 'StartProxy 返回 0（内核启动失败）';
       }
       return port;
     } catch (e) {
-      _port = 0;
-      _lastError = '$e';
+      _lastError = '加载 echproxy.dll 失败：$e';
       return 0;
     }
   }
