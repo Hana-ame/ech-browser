@@ -189,6 +189,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
   String _status = '正在启动内核…';
   bool _canGoBack = false;
   bool _canGoForward = false;
+  // Impeller 首帧 surface 与 WebView2 子窗口创建存在竞态（Windows 0xC0000005）。
+  // 首帧完成后再延迟一小段创建 webview，避开竞态窗口。
+  bool _webviewArmed = false;
 
   @override
   void initState() {
@@ -242,6 +245,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
       _status = port > 0
           ? '内核就绪 · 端口 $port'
           : '内核启动失败：${_proxy.lastError.isNotEmpty ? _proxy.lastError : "未知错误"}';
+    });
+    // 首帧渲染完成后再 arm webview（规避 Impeller surface 与 WebView2 子窗口的创建竞态）
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      if (!mounted) return;
+      setState(() => _webviewArmed = true);
     });
   }
 
@@ -462,6 +471,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   Widget _webview() {
     if (_starting) return const Center(child: CircularProgressIndicator());
+    if (!_webviewArmed) {
+      return const Center(child: CircularProgressIndicator());
+    }
     // CI smoke 专用：ECH_HEADLESS=1 时不创建 webview，只让内核跑起来被 curl 验证。
     // 无头 Windows runner 上 WebView2/GPU 初始化偶发访问违例，会污染 smoke 结论。
     if (Platform.environment['ECH_HEADLESS'] == '1') {
@@ -470,7 +482,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
               style: TextStyle(color: Colors.white70)));
     }
     return InAppWebView(
-      initialUrlRequest: URLRequest(url: WebUri(kHomePage)),
+      // 不在此处 initialUrlRequest：创建后延迟导航，避开创建瞬间的渲染/导航竞态
+
       initialUserScripts: UnmodifiableListView<UserScript>([
         UserScript(
           source: _kEchFetchBridgeScript,
@@ -489,6 +502,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
       ),
       onWebViewCreated: (c) {
         _web = c;
+        Future<void>.delayed(const Duration(milliseconds: 300), () async {
+          try {
+            await c.loadUrl(urlRequest: URLRequest(url: WebUri(kHomePage)));
+          } catch (_) {}
+        });
         c.addJavaScriptHandler(
           handlerName: 'echFetch',
           callback: (args) async {
