@@ -10,6 +10,7 @@ import 'crash_log.dart';
 import 'interceptor.dart';
 import 'proxy_manager.dart';
 import 'settings_store.dart';
+import 'single_instance.dart';
 
 /// ech-browser：点开即用的通用 ECH 浏览器。
 /// 任意 http(s) 网址可访问；webview 请求经拦截交给本地 go 内核，
@@ -20,6 +21,11 @@ void main() {
   // 在根 zone 触发，与自定义 zone 的 timer/microtask 语义错位，表现为进程
   // 几秒后静默退出（Windows 退出码 -1）。
   WidgetsFlutterBinding.ensureInitialized();
+  // 单实例：两个实例同时抢同一个 WebView2 用户数据目录会闪退
+  if (!acquireSingleInstanceLock()) {
+    // 已有实例在运行 → 静默退出（避免 WebView2 profile 冲突导致崩溃）
+    exit(0);
+  }
   if (Platform.environment['ECH_NO_CRASHHOOK'] == '1') {
     // 二分开关：跳过崩溃钩子/守护 zone（v0.3.0 形态），用于定位 0xC0000005
     runApp(const EchBrowserApp());
