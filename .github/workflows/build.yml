@@ -127,25 +127,20 @@ jobs:
       - name: Disable Impeller (Windows 0xC0000005 修复，flutter#188635)
         shell: pwsh
         run: |
-          # Windows 上 Impeller + 重度 FFI 会 heap corruption（0xC0000005）。
-          # 引擎开关必须经环境变量在引擎初始化前设置（argv 方式不生效）：
-          #   FLUTTER_ENGINE_SWITCHES=1 + FLUTTER_ENGINE_SWITCH_1=enable-impeller=false
+          # Windows Impeller + WebView2/FFI 组合会 heap corruption（0xC0000005）。
+          # 用 embedder 公开 API 在构建期关闭：DartProject::set_impeller_switch(Disabled)
           $main = "windows/runner/main.cpp"
           $text = Get-Content $main -Raw
-          if ($text -notmatch "FLUTTER_ENGINE_SWITCH") {
-            $inject = @"
-          ::SetEnvironmentVariableW(L"FLUTTER_ENGINE_SWITCHES", L"1");
-          ::SetEnvironmentVariableW(L"FLUTTER_ENGINE_SWITCH_1", L"--enable-impeller=false");
-          "@
+          if ($text -notmatch "set_impeller_switch") {
             $anchor = 'flutter::DartProject project(L"data");'
-            $text = $text.Replace($anchor, "$inject`n  $anchor")
+            $inject = "$anchor`n  project.set_impeller_switch(flutter::ImpellerSwitch::Disabled);"
+            $text = $text.Replace($anchor, $inject)
             Set-Content $main $text
-            Write-Host "patched main.cpp (impeller disabled)"
+            Write-Host "patched main.cpp: impeller disabled via set_impeller_switch"
           } else {
             Write-Host "main.cpp already patched"
           }
-          Get-Content $main | Select-String -Pattern "FLUTTER_ENGINE_SWITCH" | ForEach-Object { Write-Host $_ }
-
+          Get-Content $main | Select-String -Pattern "set_impeller_switch" | ForEach-Object { Write-Host $_ }
       - name: Patch flutter_inappwebview_windows CMake (MSVC 14.51 STL1011)
         shell: pwsh
         run: |
@@ -179,8 +174,6 @@ jobs:
       - name: Smoke test — GUI 真拉起 + 内核 ECH + panic 兜底 + 存活 10s
         shell: pwsh
         run: |
-          $env:FLUTTER_ENGINE_SWITCHES = "1"
-          $env:FLUTTER_ENGINE_SWITCH_1 = "--enable-impeller=false"
           $env:ECH_NO_CRASHHOOK = "1"
           $env:ECH_NO_LOGFILE = "1"
           $exe = "stage/windows/ech_browser.exe"
