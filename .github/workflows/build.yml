@@ -107,57 +107,7 @@ jobs:
       - run: flutter test
 
   # 每次 push 都真跑一次：构建 Windows exe → 启动存活检查 → curl go 内核端口。
-  # 「构建通过 ≠ 能启动」（v0.2.0 缺 dll 事故），本 job 是那次事故的兜底。  # 诊断（非门禁）：区分崩溃来自 Impeller 还是拦截桥。
-  windows-diagnose:
-    needs: [go-cshared]
-    continue-on-error: true
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with: { name: go-windows-amd64, path: godll }
-      - uses: subosito/flutter-action@v2
-        with: { channel: stable }
-      - run: flutter pub get
-      - run: flutter create --platforms=windows --project-name ech_browser .
-      - name: Patch flutter_inappwebview_windows CMake (MSVC 14.51 STL1011)
-        shell: pwsh
-        run: |
-          $plug = Get-ChildItem "$env:LOCALAPPDATA\Pub\Cache\hosted\pub.dev" -Directory -Filter "flutter_inappwebview_windows-*" | Select-Object -First 1
-          $cm = Join-Path $plug.FullName "windows\CMakeLists.txt"
-          $anchor = "project(`${PROJECT_NAME} LANGUAGES CXX)"
-          $inject = "add_definitions(-D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)"
-          $text = Get-Content $cm -Raw
-          if ($text -notmatch "SILENCE_EXPERIMENTAL_COROUTINE") { Set-Content $cm $text.Replace($anchor, "$anchor`n$inject") }
-      - name: Build Windows release
-        run: flutter build windows --release
-      - name: Stage
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path stage/windows | Out-Null
-          Copy-Item -Recurse -Force "build/windows/x64/runner/Release/*" stage/windows/
-          $crt = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($crt) { Copy-Item -Force "$($crt.FullName)\*.dll" stage/windows }
-          Copy-Item -Force "godll/echproxy.dll" "stage/windows/echproxy.dll"
-      - name: Experiments (不设门禁，仅打印读数)
-        shell: pwsh
-        run: |
-          function Try-Run([string]$name, [string[]]$args, [hashtable]$envs) {
-            foreach ($k in $envs.Keys) { Set-Item -Path "Env:$k" -Value $envs[$k] }
-            $p = Start-Process -FilePath "stage/windows/ech_browser.exe" -WorkingDirectory "stage/windows" -ArgumentList $args -PassThru `
-                   -RedirectStandardOutput "diag-$name.out.txt" -RedirectStandardError "diag-$name.err.txt"
-            Start-Sleep -Seconds 12
-            $exited = $p.HasExited
-            $code = if ($exited) { $p.ExitCode } else { 0 }
-            Write-Host ("diag[{0}]: exited={1} code=0x{2:X8}" -f $name, $exited, $code)
-            Get-Content "diag-$name.err.txt" -ErrorAction SilentlyContinue | Select-String -Pattern "Impeller|Skia|PANIC|panic" | Select-Object -First 3 | ForEach-Object { Write-Host "  $_" }
-            if (-not $exited) { Stop-Process -Id $p.Id -Force }
-            foreach ($k in $envs.Keys) { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
-          }
-          Try-Run "impeller-off" @("--enable-impeller=false") @{}
-          Try-Run "no-intercept" @() @{ ECH_NO_INTERCEPT = "1" }
-
-
+  # 「构建通过 ≠ 能启动」（v0.2.0 缺 dll 事故），本 job 是那次事故的兜底。
   windows-smoke:
     needs: [go-cshared]
     runs-on: windows-latest
@@ -174,6 +124,28 @@ jobs:
       - run: flutter pub get
       - name: Generate Windows runner (if missing)
         run: flutter create --platforms=windows --project-name ech_browser .
+      - name: Disable Impeller (Windows 0xC0000005 修复，flutter#188635)
+        shell: pwsh
+        run: |
+          # Windows 上 Impeller + 重度 FFI 会 heap corruption（0xC0000005）。
+          # 引擎开关必须经环境变量在引擎初始化前设置（argv 方式不生效）：
+          #   FLUTTER_ENGINE_SWITCHES=1 + FLUTTER_ENGINE_SWITCH_1=enable-impeller=false
+          $main = "windows/runner/main.cpp"
+          $text = Get-Content $main -Raw
+          if ($text -notmatch "FLUTTER_ENGINE_SWITCH") {
+            $inject = @"
+          ::SetEnvironmentVariableW(L"FLUTTER_ENGINE_SWITCHES", L"1");
+          ::SetEnvironmentVariableW(L"FLUTTER_ENGINE_SWITCH_1", L"enable-impeller=false");
+          "@
+            $anchor = 'flutter::DartProject project(L"data");'
+            $text = $text.Replace($anchor, "$inject`n  $anchor")
+            Set-Content $main $text
+            Write-Host "patched main.cpp (impeller disabled)"
+          } else {
+            Write-Host "main.cpp already patched"
+          }
+          Get-Content $main | Select-String -Pattern "FLUTTER_ENGINE_SWITCH" | ForEach-Object { Write-Host $_ }
+
       - name: Patch flutter_inappwebview_windows CMake (MSVC 14.51 STL1011)
         shell: pwsh
         run: |
