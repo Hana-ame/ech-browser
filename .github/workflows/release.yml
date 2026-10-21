@@ -259,15 +259,18 @@ jobs:
           Write-Host "kernel OK; ECH request OK=$echOK"
           # 验证请求处理链的 panic 兜底：/__panic 必须返回 500 且进程不退出。
           # （Go handler goroutine 里未 recover 的 panic 会 abort 整个进程 = 闪退）
-          try {
-            $rp = Invoke-WebRequest -Uri "http://127.0.0.1:8443/__panic" -TimeoutSec 10 -UseBasicParsing -SkipHttpErrorCheck
-            if ($rp.StatusCode -ne 500) { Write-Error "panic 兜底异常：/__panic 返回 $($rp.StatusCode)"; exit 1 }
-          } catch { Write-Error "panic 兜底调用失败：$($_.Exception.Message)"; exit 1 }
-          if ($p.HasExited) { Write-Error "panic 后进程退出（recover 未生效，闪退风险）"; exit 1 }
-          try {
-            $rh = Invoke-WebRequest -Uri "http://127.0.0.1:8443/health" -TimeoutSec 5 -UseBasicParsing
-            if ($rh.StatusCode -ne 200) { Write-Error "panic 后内核 /health 非 200"; exit 1 }
-          } catch { Write-Error "panic 后内核不再响应（进程可能已崩溃）"; exit 1 }
+          # 用 curl.exe 取原始状态码（Invoke-WebRequest 对异常响应会抛发送错误）
+          $code = & curl.exe -s -o NUL -w "%{http_code}" --max-time 15 "http://127.0.0.1:8443/__panic"
+          Write-Host "panic endpoint http_code=$code exited=$($p.HasExited)"
+          if ($p.HasExited) {
+            Write-Host "--- kernel.log tail ---"
+            Get-Content "$env:USERPROFILE\.ech-browser\kernel.log" -ErrorAction SilentlyContinue | Select-Object -Last 15
+            Write-Error "panic 后进程退出（recover 未生效，闪退风险）"
+            exit 1
+          }
+          if ($code -ne "500") { Write-Error "panic 兜底异常：http_code=$code"; exit 1 }
+          $code2 = & curl.exe -s -o NUL -w "%{http_code}" --max-time 10 "http://127.0.0.1:8443/health"
+          if ($code2 -ne "200") { Write-Error "panic 后内核 /health=$code2（进程可能已崩溃）"; exit 1 }
           Write-Host "panic recovery OK; process alive"
           if ($exited) {
             $hex = "0x{0:X8}" -f $code
