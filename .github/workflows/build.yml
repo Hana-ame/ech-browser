@@ -176,6 +176,18 @@ jobs:
         run: |
           $env:ECH_NO_CRASHHOOK = "1"
           $env:ECH_NO_LOGFILE = "1"
+          # 诊断对照（不设门禁）：关闭拦截桥跑 10s，判断崩溃是否来自拦截桥
+          $env:ECH_NO_INTERCEPT = "1"
+          $pd = Start-Process -FilePath "stage/windows/ech_browser.exe" -WorkingDirectory "stage/windows" -PassThru `
+                  -RedirectStandardOutput "stage/windows/diag-nointercept.out.txt" -RedirectStandardError "stage/windows/diag-nointercept.err.txt"
+          Start-Sleep -Seconds 10
+          $pdExited = $pd.HasExited
+          $pdCode = if ($pdExited) { $pd.ExitCode } else { 0 }
+          Write-Host ("diag[no-intercept]: exited={0} code=0x{1:X8}" -f $pdExited, $pdCode)
+          if (-not $pdExited) { Stop-Process -Id $pd.Id -Force -ErrorAction SilentlyContinue }
+          Remove-Item Env:ECH_NO_INTERCEPT -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+
           $exe = "stage/windows/ech_browser.exe"
           $dumpDir = (Join-Path (Get-Location) "dumps")
           New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
