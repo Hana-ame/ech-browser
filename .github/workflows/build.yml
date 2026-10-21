@@ -184,6 +184,11 @@ jobs:
           $env:ECH_NO_CRASHHOOK = "1"
           $env:ECH_NO_LOGFILE = "1"
           $exe = "stage/windows/ech_browser.exe"
+          $dumpDir = (Join-Path (Get-Location) "dumps")
+          New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
+          New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\ech_browser.exe" -Force | Out-Null
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\ech_browser.exe" -Name DumpFolder -Value $dumpDir
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\ech_browser.exe" -Name DumpType -Value 2
           if (-not (Test-Path $exe)) { Write-Error "missing exe: $exe"; exit 1 }
           $p = Start-Process -FilePath $exe -WorkingDirectory "stage/windows" -PassThru `
                  -RedirectStandardOutput "stage/windows/smoke.out.txt" -RedirectStandardError "stage/windows/smoke.err.txt"
@@ -220,6 +225,12 @@ jobs:
           if (-not $kernelOK) { Write-Host "--- stderr ---"; Get-Content "stage/windows/smoke.err.txt" -ErrorAction SilentlyContinue; Write-Error "内核端口 8443 未响应"; exit 1 }
           if (-not $echOK) {
             Write-Host ("exited={0}" -f $p.HasExited)
+            Start-Sleep -Seconds 6
+            Write-Host "--- Application Error / WER events ---"
+            Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000,1001} -MaxEvents 10 -ErrorAction SilentlyContinue |
+              Where-Object { $_.Message -match 'ech_browser' } | Format-List TimeCreated, Id, ProviderName, Message
+            Write-Host "--- dumps ---"
+            Get-ChildItem "dumps" -ErrorAction SilentlyContinue | Select-Object Name, Length
             if ($p.HasExited) { Write-Host ("exit code: 0x{0:X8}" -f $p.ExitCode) }
             Write-Host "--- stderr (full) ---"
             Get-Content "stage/windows/smoke.err.txt" -ErrorAction SilentlyContinue
@@ -243,3 +254,10 @@ jobs:
           if ($p.MainWindowHandle -eq 0) { Write-Error "10s 后窗口句柄消失"; exit 1 }
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           Write-Host "smoke passed: GUI up + kernel ECH 200 + panic recovered + stable 10s"
+      - name: Upload crash dumps (for analysis)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-crash-dumps
+          path: dumps/
+          if-no-files-found: ignore

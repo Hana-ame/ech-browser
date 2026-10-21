@@ -248,6 +248,11 @@ jobs:
           $env:ECH_NO_CRASHHOOK = "1"
           $env:ECH_NO_LOGFILE = "1"
           $exe = "release/windows/ech_browser.exe"
+          $dumpDir = (Join-Path (Get-Location) "dumps")
+          New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
+          New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\ech_browser.exe" -Force | Out-Null
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\ech_browser.exe" -Name DumpFolder -Value $dumpDir
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\ech_browser.exe" -Name DumpType -Value 2
           if (-not (Test-Path $exe)) { Write-Error "missing exe: $exe"; exit 1 }
           $p = Start-Process -FilePath $exe -WorkingDirectory "release/windows" -PassThru `
                  -RedirectStandardOutput "release/windows/smoke.out.txt" -RedirectStandardError "release/windows/smoke.err.txt"
@@ -284,6 +289,12 @@ jobs:
           if (-not $kernelOK) { Write-Host "--- stderr ---"; Get-Content "release/windows/smoke.err.txt" -ErrorAction SilentlyContinue; Write-Error "内核端口 8443 未响应"; exit 1 }
           if (-not $echOK) {
             Write-Host ("exited={0}" -f $p.HasExited)
+            Start-Sleep -Seconds 6
+            Write-Host "--- Application Error / WER events ---"
+            Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000,1001} -MaxEvents 10 -ErrorAction SilentlyContinue |
+              Where-Object { $_.Message -match 'ech_browser' } | Format-List TimeCreated, Id, ProviderName, Message
+            Write-Host "--- dumps ---"
+            Get-ChildItem "dumps" -ErrorAction SilentlyContinue | Select-Object Name, Length
             if ($p.HasExited) { Write-Host ("exit code: 0x{0:X8}" -f $p.ExitCode) }
             Write-Host "--- stderr (full) ---"
             Get-Content "release/windows/smoke.err.txt" -ErrorAction SilentlyContinue
