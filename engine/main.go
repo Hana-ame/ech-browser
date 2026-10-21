@@ -67,6 +67,10 @@ var (
 	// proxyGen：每次 StartProxy 进入 / StopProxy 各递增。
 	proxyGen uint64
 
+	// ipMode 上游出口协议族：默认 v4。pixiv 等站对 IPv6 出口返回 403/503
+	// （ech-proxy 的 upstream.json 同样钉 v4），可在命令行/环境覆盖。
+	ipMode = "v4"
+
 	logMu       sync.RWMutex
 	logBuffer   []string
 	maxLogLines = 500
@@ -292,6 +296,14 @@ func StartProxy(bootstrapIP *C.char) (port uint16) {
 	echReady = false
 	proxyPort = 0
 	proxyMu.Unlock()
+
+	// 上游出口协议族：默认 v4（IPv6 出口被 pixiv 等站静态 403/503）
+	ipMode = "v4"
+	if v := strings.TrimSpace(os.Getenv("ECH_IP_MODE")); v == "v4" || v == "v6" || v == "auto" {
+		ipMode = v
+	}
+	cloudflare_ech.SetIPMode(ipMode)
+	log.Printf("ECH: ip mode = %s", ipMode)
 
 	// ── 阶段 1：配置 DoH（不持锁，不探测任何站点）──────────────────────
 	bootstrap := ""
@@ -561,7 +573,7 @@ func forward(w http.ResponseWriter, r *http.Request) {
 	if scheme == "http" {
 		mode = "direct"
 	}
-	resp, err := cloudflare_ech.RoundTrip(req, mode, "")
+	resp, err := cloudflare_ech.RoundTrip(req, mode, ipMode)
 	if err != nil {
 		log.Printf("RoundTrip error: %v", err)
 		errorPage(w, http.StatusBadGateway, "上游访问失败", err, target)

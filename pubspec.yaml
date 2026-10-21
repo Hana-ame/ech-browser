@@ -1,7 +1,7 @@
 name: ech_browser
 description: 点开即用的 ECH 独立浏览器（flutter 壳 + go ech 内核，webview 拦截免改系统配置）
 publish_to: 'none'
-version: 0.3.3
+version: 0.3.4
 
 environment:
   sdk: '>=3.4.0 <4.0.0'
