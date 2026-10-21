@@ -96,3 +96,22 @@ CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC=aarch64-linux-android21-clang go buil
 
 - 下载文件落到**用户 Downloads 目录**（不可写时回落系统临时目录），重名自动追加 ` (n)` 后缀
 - DoH 地址在「设置」里可改并**持久化**到 `~/.ech-browser/settings.json`，重启内核仍生效
+
+## 故障排查（Windows 闪退）
+
+按顺序排查：
+
+1. **解压目录里 exe/dll 是否还在**。若运行过之后顶层文件消失（只剩 `data/`、
+   `ech_browser.exe.WebView2/`）→ 99% 是**杀毒软件隔离**（exe 未签名，会被误报）。
+   - 打开「Windows 安全中心 → 病毒和威胁防护 → 保护历史记录」确认
+   - 把解压目录加入排除项，重新解压运行
+2. **看内核落盘日志**：`%USERPROFILE%\.ech-browser\kernel.log`
+   （go 内核每次启动/每个请求都写；闪退前的最后一行就是现场）
+3. **看 Dart 崩溃日志**：`%USERPROFILE%\.ech-browser\crash.log`
+   （未捕获的 Dart 异常会落盘）
+4. 仍无法定位时，把上面两个日志文件回传即可。
+5. 若提示缺少 WebView2 运行时：安装 Microsoft Edge WebView2 Evergreen Runtime
+   （Win10/11 通常随 Edge 自带）。
+
+> v0.3.2 起：请求处理链的 panic 已被兜底（返回 500 错误页而不 abort 整个进程），
+> 并新增上述两个落盘日志；CI smoke 也会验证 panic 兜底生效。

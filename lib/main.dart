@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' show PlatformDispatcher;
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'crash_log.dart';
 import 'interceptor.dart';
 import 'proxy_manager.dart';
 import 'settings_store.dart';
@@ -12,8 +15,22 @@ import 'settings_store.dart';
 /// 任意 http(s) 网址可访问；webview 请求经拦截交给本地 go 内核，
 /// 免改系统 hosts、免手动安装证书。目标：与普通浏览器使用体验无异。
 void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(const EchBrowserApp());
+  // 全局兜底：任何未捕获的 Dart 异常都落盘，闪退后可通过
+  // ~/.ech-browser/crash.log（或临时目录同名文件）回传定位。
+  runZonedGuarded(() {
+    WidgetsFlutterBinding.ensureInitialized();
+    FlutterError.onError = (details) {
+      CrashLog.write('flutter', details.exception, details.stack);
+      FlutterError.presentError(details);
+    };
+    PlatformDispatcher.instance.onError = (error, stack) {
+      CrashLog.write('platform', error, stack);
+      return true;
+    };
+    runApp(const EchBrowserApp());
+  }, (error, stack) {
+    CrashLog.write('zone', error, stack);
+  });
 }
 
 /// 默认首页（可改任意网址；地址栏可访问任何站点或输入关键词搜索）。

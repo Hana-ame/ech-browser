@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -86,9 +87,39 @@ var hopByHop = map[string]bool{
 
 type logWriter struct{}
 
+var kernelLogPathOnce sync.Once
+var kernelLogPath string
+
+// kernelLogFilePath 返回持久化日志路径（~/.ech-browser/kernel.log）。
+// 闪退/abort 后进程内环形缓冲会一起消失，落盘日志是唯一可回传的证据。
+func kernelLogFilePath() string {
+	kernelLogPathOnce.Do(func() {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return
+		}
+		dir := filepath.Join(home, ".ech-browser")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return
+		}
+		kernelLogPath = filepath.Join(dir, "kernel.log")
+	})
+	return kernelLogPath
+}
+
 func (w *logWriter) Write(p []byte) (int, error) {
 	line := strings.TrimRight(string(p), "\n")
 	fmt.Fprintln(os.Stderr, line)
+	if path := kernelLogFilePath(); path != "" {
+		// 简单轮转：超过 4 MiB 备份为 .1 再重开
+		if fi, err := os.Stat(path); err == nil && fi.Size() > 4<<20 {
+			_ = os.Rename(path, path+".1")
+		}
+		if f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			_, _ = f.WriteString(line + "\n")
+			_ = f.Close()
+		}
+	}
 	logMu.Lock()
 	logBuffer = append(logBuffer, line)
 	if len(logBuffer) > maxLogLines {
@@ -292,7 +323,7 @@ func StartProxy(bootstrapIP *C.char) (port uint16) {
 	proxyPort = uint16(ln.Addr().(*net.TCPAddr).Port)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", router)
+	mux.HandleFunc("/", safeHandler(router))
 
 	proxyServer = &http.Server{
 		Handler:           mux,
@@ -391,8 +422,29 @@ func resolveTargetScheme(r *http.Request) string {
 	return "https"
 }
 
+// safeHandler 在请求处理链最外层兜底 recover。
+// 关键：Go 的 panic 若发生在 net/http 的 handler goroutine 里且无人 recover，
+// 会直接 abort **整个进程** —— 在浏览器里就是"页面一加载就闪退"。
+// 这里把任何 handler panic 转成 500 错误页并落盘，进程继续存活。
+func safeHandler(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("PANIC in handler %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprint(w, `<!DOCTYPE html><html lang="zh"><body>
+<h1>内核已捕获请求异常（进程未退出）</h1>
+<p>已记录到 &lt;用户目录&gt;/.ech-browser/kernel.log，可回传该文件定位。</p>
+</body></html>`)
+			}
+		}()
+		h(w, r)
+	}
+}
+
 func router(w http.ResponseWriter, r *http.Request) {
-	// 若客户端未传 X-ECH-Scheme 且 Host 是本机回环，则提供内置状态/诊断接口。
+	// 若客户端未传 X-Ech-Scheme 且 Host 是本机回环，则提供内置状态/诊断接口。
 	if isLocalHost(r.Host) {
 		// 阻止云元数据 IP（169.254.x.x）SSRF
 		if strings.HasPrefix(strings.TrimSpace(r.Host), "169.254.") {
@@ -412,6 +464,9 @@ func router(w http.ResponseWriter, r *http.Request) {
 				"echReady": IsEchReady() == 1,
 				"initDone": ECHInitReady() == 1,
 			})
+		case "/__panic":
+			// 自检路由：验证 recover 中间件生效（CI smoke 使用；仅本机回环可达）。
+			panic("smoke-test panic")
 		case "/logs":
 			logMu.RLock()
 			logs := strings.Join(logBuffer, "\n")
