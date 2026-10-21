@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'interceptor.dart';
 import 'proxy_manager.dart';
+import 'settings_store.dart';
 
 /// ech-browser：点开即用的通用 ECH 浏览器。
 /// 任意 http(s) 网址可访问；webview 请求经拦截交给本地 go 内核，
@@ -153,6 +154,7 @@ class BrowserScreen extends StatefulWidget {
 
 class _BrowserScreenState extends State<BrowserScreen> {
   final ProxyManager _proxy = ProxyManager.instance;
+  final SettingsStore _settings = SettingsStore();
   late final Interceptor _interceptor;
   final TextEditingController _address = TextEditingController(text: kHomePage);
   String _dohUrl = 'https://moonchan.xyz/doh';
@@ -166,7 +168,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
   void initState() {
     super.initState();
     _interceptor = Interceptor(_proxy, onSetCookies: _syncCookiesToWebView);
-    _boot();
+    _initAndBoot();
+  }
+
+  /// 先载入持久化配置（DoH 等），再启动内核——避免"改了设置重启就丢"。
+  Future<void> _initAndBoot() async {
+    await _settings.load();
+    _dohUrl = _settings.dohUrl;
+    _proxy.setDohUrl(_dohUrl);
+    await _boot();
   }
 
   Future<void> _syncCookiesToWebView(Uri url, List<String> rawCookies) async {
@@ -240,8 +250,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
       _setStatus('下载失败：${uri.toString()}');
       return;
     }
-    final dir = await Directory.systemTemp.createTemp('ech-browser-dl');
-    final name = BrowserScreen.sanitizeFileName(request.suggestedFilename, uri);
+    final dir = await SettingsStore.downloadDir();
+    final rawName = BrowserScreen.sanitizeFileName(request.suggestedFilename, uri);
+    final name = SettingsStore.uniqueFileName(
+        rawName,
+        (n) => File('${dir.path}${Platform.pathSeparator}$n').existsSync());
     final file = File('${dir.path}${Platform.pathSeparator}$name');
     await file.writeAsBytes(bytes);
     _setStatus('已下载：${file.path}');
@@ -400,7 +413,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 _dohUrl = nextDoh;
                 _proxy.setDohUrl(nextDoh);
                 _proxy.init();
-                _setStatus('已更新 DoH：$nextDoh');
+                _settings.dohUrl = nextDoh;
+                _settings.save();
+                _setStatus('已更新 DoH 并保存：$nextDoh');
               }
               Navigator.pop(ctx);
             },

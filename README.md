@@ -82,3 +82,17 @@ CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC=aarch64-linux-android21-clang go buil
   用 `Host: www.pixiv.net` curl 内核**真发一次 ECH 请求**，断言 2xx；崩溃码分级
   （缺 dll/坏镜像失败，无头会话 WebView2 访问违例仅警告）
 - `release`（v* tag）：Android APK 构建 + Windows 包 smoke 通过后发布正式 Release
+
+## 平台支持矩阵
+
+| 平台 | 产物 | 状态 |
+|---|---|---|
+| Windows x64 | `ech-browser-windows-x64.zip` | ✅ 发布前经 CI 启动 smoke + 真实 ECH 请求验证 |
+| Android arm64 | `ech-browser-android-arm64.apk` | ✅ CI 构建（两套 WebView 平台 API 差异见边界说明） |
+| Linux | — | ⏸ 暂不发布：flutter_inappwebview 6.1.x 无 Linux 实现（6.2.0-beta 才加入），构建出的包没有 webview |
+| iOS | — | ⏸ 暂不发布：iOS 需要 macOS runner + 签名证书；WebView 层已具备（flutter_inappwebview_ios） |
+
+### 下载与设置
+
+- 下载文件落到**用户 Downloads 目录**（不可写时回落系统临时目录），重名自动追加 ` (n)` 后缀
+- DoH 地址在「设置」里可改并**持久化**到 `~/.ech-browser/settings.json`，重启内核仍生效
