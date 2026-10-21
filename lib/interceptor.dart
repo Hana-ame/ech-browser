@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:async';
 import 'dart:io' as io;
 import 'dart:typed_data';
@@ -298,6 +299,8 @@ class Interceptor {
   /// - 内核未就绪或链路出错：返回 null 让 webview 走默认（不闪退）
   Future<WebResourceResponse?> onShouldInterceptRequest(
       InAppWebViewController controller, WebResourceRequest request) async {
+    // 诊断开关：ECH_NO_INTERCEPT=1 时完全关闭拦截（判断崩溃是否来自拦截桥/插件）
+    if (Platform.environment['ECH_NO_INTERCEPT'] == '1') return null;
     final url = request.url;
     if (url.scheme != 'http' && url.scheme != 'https') return null;
     final method = (request.method ?? 'GET').toUpperCase();
