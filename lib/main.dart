@@ -20,6 +20,11 @@ void main() {
   // 在根 zone 触发，与自定义 zone 的 timer/microtask 语义错位，表现为进程
   // 几秒后静默退出（Windows 退出码 -1）。
   WidgetsFlutterBinding.ensureInitialized();
+  if (Platform.environment['ECH_NO_CRASHHOOK'] == '1') {
+    // 二分开关：跳过崩溃钩子/守护 zone（v0.3.0 形态），用于定位 0xC0000005
+    runApp(const EchBrowserApp());
+    return;
+  }
   FlutterError.onError = (details) {
     CrashLog.write('flutter', details.exception, details.stack);
     FlutterError.presentError(details);

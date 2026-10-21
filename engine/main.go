@@ -110,7 +110,8 @@ func kernelLogFilePath() string {
 func (w *logWriter) Write(p []byte) (int, error) {
 	line := strings.TrimRight(string(p), "\n")
 	fmt.Fprintln(os.Stderr, line)
-	if path := kernelLogFilePath(); path != "" {
+	if os.Getenv("ECH_NO_LOGFILE") != "1" {
+		if path := kernelLogFilePath(); path != "" {
 		// 简单轮转：超过 4 MiB 备份为 .1 再重开
 		if fi, err := os.Stat(path); err == nil && fi.Size() > 4<<20 {
 			_ = os.Rename(path, path+".1")
@@ -118,6 +119,7 @@ func (w *logWriter) Write(p []byte) (int, error) {
 		if f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
 			_, _ = f.WriteString(line + "\n")
 			_ = f.Close()
+		}
 		}
 	}
 	logMu.Lock()

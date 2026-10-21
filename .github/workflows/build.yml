@@ -181,6 +181,8 @@ jobs:
         run: |
           $env:FLUTTER_ENGINE_SWITCHES = "1"
           $env:FLUTTER_ENGINE_SWITCH_1 = "--enable-impeller=false"
+          $env:ECH_NO_CRASHHOOK = "1"
+          $env:ECH_NO_LOGFILE = "1"
           $exe = "stage/windows/ech_browser.exe"
           if (-not (Test-Path $exe)) { Write-Error "missing exe: $exe"; exit 1 }
           $p = Start-Process -FilePath $exe -WorkingDirectory "stage/windows" -PassThru `
