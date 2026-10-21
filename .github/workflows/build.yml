@@ -193,6 +193,9 @@ jobs:
           if (-not $exited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
           if (-not $kernelOK) { Write-Error "内核端口 8443 从未响应（StartProxy 失败）"; exit 1 }
           Write-Host "kernel OK; ECH request OK=$echOK"
+          Start-Sleep -Seconds 5
+          Write-Host "after idle 5s: exited=$($p.HasExited)"
+          if ($p.HasExited) { Write-Host ("idle exit code: 0x{0:X8}" -f $p.ExitCode) }
           # 验证请求处理链的 panic 兜底：/__panic 必须返回 500 且进程不退出。
           # （Go handler goroutine 里未 recover 的 panic 会 abort 整个进程 = 闪退）
           # 用 curl.exe 取原始状态码（Invoke-WebRequest 对异常响应会抛发送错误）
