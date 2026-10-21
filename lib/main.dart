@@ -192,6 +192,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
   Future<void> _initAndBoot() async {
     await _settings.load();
     _dohUrl = _settings.dohUrl;
+    if (Platform.environment['ECH_NO_KERNEL'] == '1') {
+      // CI 二分用：完全不加载 go 内核，判断退出是壳还是内核引起
+      setState(() {
+        _starting = false;
+        _status = 'ECH_NO_KERNEL=1：内核已跳过';
+      });
+      return;
+    }
     _proxy.setDohUrl(_dohUrl);
     await _boot();
   }

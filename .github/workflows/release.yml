@@ -218,6 +218,22 @@ jobs:
           Compress-Archive -Path "$dst/*" -DestinationPath "release/out/ech-browser-windows-x64.zip" -CompressionLevel Optimal
           Get-Item "release/out/ech-browser-windows-x64.zip" | Select-Object Name, Length
 
+      - name: Bisect — 不加载内核时进程是否稳定（区分壳 vs 内核）
+        shell: pwsh
+        run: |
+          # 两轮对照：① 跳过内核 ② 正常启动。都只跑 8s 看是否自行退出。
+          foreach ($mode in @("nokernel", "kernel")) {
+            if ($mode -eq "nokernel") { $env:ECH_NO_KERNEL = "1"; $env:ECH_HEADLESS = "1" }
+            else { Remove-Item Env:ECH_NO_KERNEL -ErrorAction SilentlyContinue; $env:ECH_HEADLESS = "1" }
+            $p = Start-Process -FilePath "release/windows/ech_browser.exe" -WorkingDirectory "release/windows" -PassThru `
+                   -RedirectStandardOutput "bisect-$mode.out.txt" -RedirectStandardError "bisect-$mode.err.txt"
+            Start-Sleep -Seconds 8
+            $exited = $p.HasExited
+            $code = if ($exited) { $p.ExitCode } else { 0 }
+            Write-Host ("bisect[$mode]: exited={0} code=0x{1:X8}" -f $exited, $code)
+            if (-not $exited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+          }
+
       - name: Smoke test — 内核真干活（curl 内核 + ECH 请求）+ 崩溃码分级
         shell: pwsh
         run: |
